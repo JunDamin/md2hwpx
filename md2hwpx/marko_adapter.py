@@ -1,0 +1,308 @@
+"""
+Marko AST to Pandoc-like dict adapter.
+
+Converts Marko's object-based AST to the dict format expected by MarkdownToHwpx handlers.
+"""
+
+from marko import Markdown
+from marko.ext.gfm import GFM
+
+
+class MarkoToPandocAdapter:
+    """Converts Marko AST to Pandoc-like dict format."""
+
+    def __init__(self):
+        # Initialize Marko with GFM (tables, strikethrough, etc.)
+        self.md = Markdown(extensions=[GFM])
+        self.footnote_defs = {}  # Store footnote definitions
+
+    def parse(self, markdown_text: str) -> dict:
+        """
+        Parse markdown and return Pandoc-like AST dict.
+
+        Returns:
+            {"pandoc-api-version": [...], "meta": {...}, "blocks": [...]}
+        """
+        doc = self.md.parse(markdown_text)
+
+        blocks = []
+        for child in doc.children:
+            block = self._convert_block(child)
+            if block:
+                blocks.append(block)
+
+        return {
+            "pandoc-api-version": [1, 23, 1],  # Compatibility marker
+            "meta": {},  # Metadata handled separately by python-frontmatter
+            "blocks": blocks
+        }
+
+    def _convert_block(self, element) -> dict | None:
+        """Convert a Marko block element to Pandoc dict format."""
+        elem_type = type(element).__name__
+
+        if elem_type == 'Heading':
+            return self._convert_heading(element)
+        elif elem_type == 'Paragraph':
+            return self._convert_paragraph(element)
+        elif elem_type == 'List':
+            return self._convert_list(element)
+        elif elem_type == 'FencedCode':
+            return self._convert_fenced_code(element)
+        elif elem_type == 'CodeBlock':
+            return self._convert_code_block(element)
+        elif elem_type == 'Table':
+            return self._convert_table(element)
+        elif elem_type == 'Quote':
+            return self._convert_blockquote(element)
+        elif elem_type == 'ThematicBreak':
+            return {"t": "HorizontalRule"}
+        elif elem_type == 'BlankLine':
+            return None  # Skip blank lines
+        elif elem_type == 'HTMLBlock':
+            return self._convert_raw_block(element)
+        elif elem_type == 'LinkRefDef':
+            return None  # Skip link reference definitions (handled during parsing)
+        elif elem_type == 'SetextHeading':
+            return self._convert_heading(element)
+
+        # Unknown block type - skip with warning
+        # print(f"[Warn] Unknown block type: {elem_type}")
+        return None
+
+    def _convert_heading(self, elem) -> dict:
+        """Heading -> {"t": "Header", "c": [level, [id, [], []], inlines]}"""
+        inlines = self._convert_children_to_inlines(elem.children)
+        level = getattr(elem, 'level', 1)
+        return {
+            "t": "Header",
+            "c": [level, ["", [], []], inlines]
+        }
+
+    def _convert_paragraph(self, elem) -> dict:
+        """Paragraph -> {"t": "Para", "c": [inlines]}"""
+        inlines = self._convert_children_to_inlines(elem.children)
+        return {"t": "Para", "c": inlines}
+
+    def _convert_list(self, elem) -> dict:
+        """List -> BulletList or OrderedList"""
+        items = []
+        for item in elem.children:
+            item_blocks = []
+            for child in item.children:
+                block = self._convert_block(child)
+                if block:
+                    item_blocks.append(block)
+            items.append(item_blocks)
+
+        ordered = getattr(elem, 'ordered', False)
+        if ordered:
+            # OrderedList: [[start, style, delim], items]
+            start = getattr(elem, 'start', 1) or 1
+            return {
+                "t": "OrderedList",
+                "c": [[start, {"t": "Decimal"}, {"t": "Period"}], items]
+            }
+        else:
+            return {"t": "BulletList", "c": items}
+
+    def _convert_fenced_code(self, elem) -> dict:
+        """FencedCode -> {"t": "CodeBlock", "c": [[id, classes, attrs], code]}"""
+        lang = getattr(elem, 'lang', '') or ''
+        code = ''
+        for child in elem.children:
+            if hasattr(child, 'children'):
+                code += child.children
+            else:
+                code += str(child)
+        return {
+            "t": "CodeBlock",
+            "c": [["", [lang] if lang else [], []], code]
+        }
+
+    def _convert_code_block(self, elem) -> dict:
+        """CodeBlock (indented) -> {"t": "CodeBlock", "c": [[id, [], []], code]}"""
+        code = ''
+        for child in elem.children:
+            if hasattr(child, 'children'):
+                code += child.children
+            else:
+                code += str(child)
+        return {
+            "t": "CodeBlock",
+            "c": [["", [], []], code]
+        }
+
+    def _convert_table(self, elem) -> dict:
+        """Convert Marko GFM Table to Pandoc Table format."""
+        # Pandoc Table: [attr, caption, specs, head, bodies, foot]
+
+        rows = list(elem.children)
+        if not rows:
+            return None
+
+        # First row is header in GFM (TableHead)
+        head_elem = None
+        body_rows = []
+
+        for child in elem.children:
+            child_type = type(child).__name__
+            if child_type == 'TableHead':
+                head_elem = child
+            elif child_type == 'TableBody':
+                body_rows = list(child.children)
+
+        # Determine column count from header or first body row
+        col_count = 0
+        if head_elem and head_elem.children:
+            first_head_row = head_elem.children[0] if head_elem.children else None
+            if first_head_row:
+                col_count = len(first_head_row.children)
+        elif body_rows:
+            col_count = len(body_rows[0].children) if body_rows[0].children else 0
+
+        # Column specs (alignment)
+        specs = [["AlignDefault", {"t": "ColWidthDefault"}] for _ in range(col_count)]
+
+        # Convert header
+        head_rows = []
+        if head_elem:
+            for row in head_elem.children:
+                head_rows.append(self._convert_table_row(row))
+        head = [["", [], []], head_rows]
+
+        # Convert body
+        body_converted = [self._convert_table_row(r) for r in body_rows]
+        bodies = [[["", [], []], 0, [], body_converted]] if body_converted else []
+
+        # Foot (GFM doesn't have)
+        foot = [["", [], []], []]
+
+        return {
+            "t": "Table",
+            "c": [
+                ["", [], []],           # attr
+                [None, []],             # caption
+                specs,                  # colspecs
+                head,                   # thead
+                bodies,                 # tbody
+                foot                    # tfoot
+            ]
+        }
+
+    def _convert_table_row(self, row) -> list:
+        """Convert TableRow to Pandoc row format."""
+        # Pandoc row: [attr, [cells]]
+        cells = []
+        for cell in row.children:
+            # Pandoc cell: [attr, align, rowspan, colspan, [blocks]]
+            content = self._convert_children_to_inlines(cell.children)
+            para = {"t": "Plain", "c": content}
+            cells.append([
+                ["", [], []],   # attr
+                "AlignDefault", # align
+                1,              # rowspan (GFM doesn't support)
+                1,              # colspan (GFM doesn't support)
+                [para]          # blocks
+            ])
+        return [["", [], []], cells]
+
+    def _convert_blockquote(self, elem) -> dict:
+        """Quote -> {"t": "BlockQuote", "c": [blocks]}"""
+        blocks = []
+        for child in elem.children:
+            block = self._convert_block(child)
+            if block:
+                blocks.append(block)
+        return {"t": "BlockQuote", "c": blocks}
+
+    def _convert_raw_block(self, elem) -> dict:
+        """HTMLBlock -> {"t": "RawBlock", "c": ["html", content]}"""
+        content = getattr(elem, 'children', '')
+        return {"t": "RawBlock", "c": ["html", content]}
+
+    def _convert_children_to_inlines(self, children) -> list:
+        """Convert Marko inline children to Pandoc inline list."""
+        if children is None:
+            return []
+
+        result = []
+        for child in children:
+            inlines = self._convert_inline(child)
+            if isinstance(inlines, list):
+                result.extend(inlines)
+            elif inlines:
+                result.append(inlines)
+        return result
+
+    def _convert_inline(self, elem):
+        """Convert a Marko inline element to Pandoc inline dict."""
+        elem_type = type(elem).__name__
+
+        if elem_type == 'RawText':
+            return self._convert_raw_text(elem.children)
+        elif elem_type == 'Emphasis':
+            inlines = self._convert_children_to_inlines(elem.children)
+            return {"t": "Emph", "c": inlines}
+        elif elem_type == 'StrongEmphasis':
+            inlines = self._convert_children_to_inlines(elem.children)
+            return {"t": "Strong", "c": inlines}
+        elif elem_type == 'Link':
+            inlines = self._convert_children_to_inlines(elem.children)
+            dest = getattr(elem, 'dest', '')
+            title = getattr(elem, 'title', '') or ''
+            return {"t": "Link", "c": [["", [], []], inlines, [dest, title]]}
+        elif elem_type == 'Image':
+            inlines = self._convert_children_to_inlines(elem.children)
+            dest = getattr(elem, 'dest', '')
+            title = getattr(elem, 'title', '') or ''
+            return {"t": "Image", "c": [["", [], []], inlines, [dest, title]]}
+        elif elem_type == 'CodeSpan':
+            code = getattr(elem, 'children', '')
+            return {"t": "Code", "c": [["", [], []], code]}
+        elif elem_type == 'LineBreak':
+            return {"t": "LineBreak"}
+        elif elem_type == 'SoftBreak':
+            return {"t": "SoftBreak"}
+        elif elem_type == 'Strikethrough':
+            inlines = self._convert_children_to_inlines(elem.children)
+            return {"t": "Strikeout", "c": inlines}
+        elif elem_type == 'InlineHTML':
+            content = getattr(elem, 'children', '')
+            return {"t": "RawInline", "c": ["html", content]}
+        elif elem_type == 'AutoLink':
+            dest = getattr(elem, 'dest', '')
+            return {"t": "Link", "c": [["", [], []], [{"t": "Str", "c": dest}], [dest, ""]]}
+        elif elem_type == 'Literal':
+            text = getattr(elem, 'children', '')
+            return self._convert_raw_text(text)
+
+        # Handle string children (e.g., from RawText)
+        if isinstance(elem, str):
+            return self._convert_raw_text(elem)
+
+        # Unknown inline type - try to get text content
+        if hasattr(elem, 'children'):
+            if isinstance(elem.children, str):
+                return self._convert_raw_text(elem.children)
+            elif isinstance(elem.children, list):
+                return self._convert_children_to_inlines(elem.children)
+
+        return None
+
+    def _convert_raw_text(self, text: str) -> list:
+        """Convert raw text to Str and Space tokens."""
+        if not text:
+            return []
+
+        result = []
+        # Split by spaces but keep track of leading/trailing spaces
+        parts = text.split(' ')
+
+        for i, part in enumerate(parts):
+            if part:
+                result.append({"t": "Str", "c": part})
+            if i < len(parts) - 1:
+                result.append({"t": "Space"})
+
+        return result
