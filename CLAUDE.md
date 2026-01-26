@@ -41,8 +41,10 @@ md2hwpx/
 
 | File | Purpose |
 |------|---------|
-| `md2hwpx/converter.py` | Core conversion engine |
+| `md2hwpx/MarkdownToHwpx.py` | Core HWPX conversion engine |
+| `md2hwpx/marko_adapter.py` | Marko AST to Pandoc-like format adapter |
 | `md2hwpx/cli.py` | CLI argument parsing |
+| `md2hwpx/blank.hwpx` | Default template with styles |
 
 ## Dependencies
 
@@ -105,9 +107,17 @@ def _handle_blocktype(self, block, ...):
 
 ### Style System
 
-- Styles from reference HWPX are parsed into `self.styles` dict
+- Styles from reference HWPX are parsed into `self.dynamic_style_map` dict
 - Character properties cached with `_get_char_pr_id()`
 - Numbering definitions created dynamically for lists
+- Users can customize styles by editing the template HWPX in Hancom Office (WYSIWYG)
+
+### Extended Header Levels (7-9)
+
+Standard Markdown only supports header levels 1-6. md2hwpx extends this to support levels 7-9:
+- `marko_adapter.py` preprocesses `#######`, `########`, `#########` lines
+- Converts them to placeholders before Marko parsing
+- Restores them as Header blocks with levels 7, 8, 9 after parsing
 
 ## Testing
 
@@ -124,14 +134,20 @@ md2hwpx test.md -o test-from-md.hwpx
 
 1. Read `docs/CLAUDE_ARCHITECTURE.md` for detailed handler patterns
 2. Find the block type in Marko AST documentation
-3. Add handler method `_handle_<blocktype>()` in `converter.py`
+3. Add handler method `_handle_<blocktype>()` in `MarkdownToHwpx.py`
 4. Register in `convert()` method's block processing loop
 
 ### Modify style handling
 
-1. Study `_parse_styles_and_init_xml()` method
+1. Study `_parse_styles_and_init_xml()` method in `MarkdownToHwpx.py`
 2. Reference `header.xml` from `blank.hwpx` for style structure
 3. Update style mapping in relevant handler
+
+### Customize template styles (for users)
+
+1. Copy `blank.hwpx` from the package
+2. Open in Hancom Office and edit styles via Format > Styles (F6)
+3. Save and use with `--reference-doc=custom.hwpx`
 
 ### Debug conversion issues
 

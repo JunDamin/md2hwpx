@@ -4,6 +4,7 @@ Marko AST to Pandoc-like dict adapter.
 Converts Marko's object-based AST to the dict format expected by MarkdownToHwpx handlers.
 """
 
+import re
 from marko import Markdown
 from marko.ext.gfm import GFM
 
@@ -11,10 +12,63 @@ from marko.ext.gfm import GFM
 class MarkoToPandocAdapter:
     """Converts Marko AST to Pandoc-like dict format."""
 
+    # Regex to match extended headers (7-9 levels)
+    # Standard Markdown only supports 1-6, but HWPX supports up to 9
+    EXTENDED_HEADER_RE = re.compile(r'^(#{7,9})\s+(.+)$')
+
     def __init__(self):
         # Initialize Marko with GFM (tables, strikethrough, etc.)
         self.md = Markdown(extensions=[GFM])
         self.footnote_defs = {}  # Store footnote definitions
+        self.extended_headers = {}  # Store extended header placeholders
+
+    def _preprocess_extended_headers(self, markdown_text: str) -> str:
+        """
+        Preprocess markdown to handle header levels 7-9.
+
+        Standard Markdown only supports levels 1-6.
+        We convert ####### lines to unique placeholders, then restore
+        them as Header blocks after Marko parsing.
+
+        Each placeholder is wrapped with blank lines to ensure it becomes
+        its own paragraph block (not merged with adjacent text).
+        """
+        lines = markdown_text.split('\n')
+        processed_lines = []
+        placeholder_counter = 0
+
+        for line in lines:
+            match = self.EXTENDED_HEADER_RE.match(line)
+            if match:
+                hashes = match.group(1)
+                content = match.group(2)
+                level = len(hashes)
+
+                # Use a placeholder that won't trigger markdown formatting
+                # (no __, *, or other special chars)
+                placeholder = f"EXTHEADER{placeholder_counter}MARKER"
+                self.extended_headers[placeholder] = {
+                    'level': level,
+                    'content': content
+                }
+                # Add blank lines around placeholder to ensure it's a separate paragraph
+                processed_lines.append('')
+                processed_lines.append(placeholder)
+                processed_lines.append('')
+                placeholder_counter += 1
+            else:
+                processed_lines.append(line)
+
+        return '\n'.join(processed_lines)
+
+    def _create_extended_header_block(self, level: int, content: str) -> dict:
+        """Create a Header block for extended levels (7-9)."""
+        # Parse the content as inline markdown
+        inlines = self._convert_raw_text(content)
+        return {
+            "t": "Header",
+            "c": [level, ["", [], []], inlines]
+        }
 
     def parse(self, markdown_text: str) -> dict:
         """
@@ -23,12 +77,20 @@ class MarkoToPandocAdapter:
         Returns:
             {"pandoc-api-version": [...], "meta": {...}, "blocks": [...]}
         """
-        doc = self.md.parse(markdown_text)
+        # Reset extended headers for each parse
+        self.extended_headers = {}
+
+        # Preprocess to handle extended headers (7-9)
+        processed_text = self._preprocess_extended_headers(markdown_text)
+
+        doc = self.md.parse(processed_text)
 
         blocks = []
         for child in doc.children:
             block = self._convert_block(child)
             if block:
+                # Check if this is an extended header placeholder
+                block = self._restore_extended_header(block)
                 blocks.append(block)
 
         return {
@@ -36,6 +98,31 @@ class MarkoToPandocAdapter:
             "meta": {},  # Metadata handled separately by python-frontmatter
             "blocks": blocks
         }
+
+    def _restore_extended_header(self, block: dict) -> dict:
+        """
+        Check if a block is an extended header placeholder and restore it.
+
+        Extended header placeholders become paragraphs with text like
+        "__EXTENDED_HEADER_0__", which we convert back to Header blocks.
+        """
+        if block.get('t') != 'Para':
+            return block
+
+        inlines = block.get('c', [])
+        if len(inlines) != 1:
+            return block
+
+        first = inlines[0]
+        if first.get('t') != 'Str':
+            return block
+
+        text = first.get('c', '')
+        if text in self.extended_headers:
+            info = self.extended_headers[text]
+            return self._create_extended_header_block(info['level'], info['content'])
+
+        return block
 
     def _convert_block(self, element) -> dict | None:
         """Convert a Marko block element to Pandoc dict format."""
