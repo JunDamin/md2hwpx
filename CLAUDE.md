@@ -2,69 +2,66 @@
 
 ## Project Overview
 
-**pypandoc-hwpx** is a Python CLI tool that converts documents (DOCX, Markdown, HTML, JSON AST) to Korean Hancom Office HWPX format using Pandoc as the conversion engine.
+**md2hwpx** is a Python CLI tool that converts Markdown documents to Korean Hancom Office HWPX format. It uses the Marko library to parse Markdown and generates HWPX output directly (Pandoc-free).
 
 ## Quick Commands
 
 ```bash
-Install for development
+# Install for development
 pip install -e .
 
 # Run the tool
-pypandoc-hwpx <input> -o <output.hwpx> [--reference-doc=<ref.hwpx>]
-# 
-# Examples
-pypandoc-hwpx test.md -o output.hwpx
-pypandoc-hwpx test.docx --reference-doc=custom.hwpx -o output.hwpx
+md2hwpx <input.md> -o <output.hwpx> [--reference-doc=<ref.hwpx>]
 
-# Debug outputs (HTML/JSON intermediate formats)
-pypandoc-hwpx test.md -o debug.html
-pypandoc-hwpx test.md -o debug.json
+# Examples
+md2hwpx test.md -o output.hwpx
+md2hwpx test.md --reference-doc=custom.hwpx -o output.hwpx
+
+# Debug outputs (JSON AST intermediate format)
+md2hwpx test.md -o debug.json
 ```
 
 ## Project Structure
 
 ```
-pypandoc-hwpx/
-├── pypandoc_hwpx/           # Main package
-│   ├── cli.py               # CLI entry point (routes by extension)
-│   ├── PandocToHwpx.py      # Core HWPX conversion (main logic)
-│   ├── PandocToHtml.py      # HTML conversion helper
+md2hwpx/
+├── md2hwpx/                 # Main package
+│   ├── cli.py               # CLI entry point
+│   ├── converter.py         # Core HWPX conversion (main logic)
 │   └── blank.hwpx           # Default reference template
 ├── tests/                   # Test files (manual testing)
-│   ├── test.md/html/docx/json  # Input samples
+│   ├── test.md              # Input sample
 │   └── test-from-*.hwpx     # Expected outputs
 ├── docs/                    # Documentation (Korean)
 │   └── CLAUDE_ARCHITECTURE.md  # Detailed architecture for Claude Code
-└── setup.py                 # Package configuration
+└── pyproject.toml           # Package configuration
 ```
 
 ## Key Files to Understand
 
-| File | Purpose | Lines |
-|------|---------|-------|
-| `pypandoc_hwpx/PandocToHwpx.py` | Core conversion engine | ~1500 |
-| `pypandoc_hwpx/cli.py` | CLI argument parsing | ~80 |
-| `pypandoc_hwpx/PandocToHtml.py` | HTML debug output | ~420 |
+| File | Purpose |
+|------|---------|
+| `md2hwpx/converter.py` | Core conversion engine |
+| `md2hwpx/cli.py` | CLI argument parsing |
 
 ## Dependencies
 
 - **Python**: 3.6+
-- **pypandoc**: Pandoc Python wrapper
+- **marko**: Markdown parser
+- **python-frontmatter**: YAML frontmatter parsing
 - **Pillow**: Image processing
-- **Pandoc**: System requirement (must be in PATH)
 
 ## Architecture Summary
 
 ```
-Input File → Pandoc → JSON AST → PandocToHwpx → HWPX ZIP
-                                      ↑
-                        Reference HWPX (styles, page setup)
+Markdown File → Marko Parser → AST → Converter → HWPX ZIP
+                                         ↑
+                           Reference HWPX (styles, page setup)
 ```
 
 ### Conversion Pipeline
 
-1. `pypandoc.convert_file()` generates JSON AST from input
+1. `marko` parses Markdown into an AST
 2. Reference HWPX (ZIP) provides styles from `header.xml` and page setup from `section0.xml`
 3. AST blocks (paragraphs, headers, tables, lists) mapped to HWPX XML
 4. Images extracted and embedded into HWPX `BinData/` directory
@@ -92,7 +89,7 @@ HWPX is a ZIP archive containing:
 
 ### Adding New Block Handler
 
-In `PandocToHwpx.py`, handlers follow this pattern:
+In `converter.py`, handlers follow this pattern:
 ```python
 def _handle_blocktype(self, block, ...):
     # 1. Create paragraph element
@@ -117,17 +114,17 @@ def _handle_blocktype(self, block, ...):
 No automated tests. Manual testing workflow:
 ```bash
 cd tests/
-pypandoc-hwpx test.md -o test-from-md.hwpx
+md2hwpx test.md -o test-from-md.hwpx
 # Open in Hancom Office to verify
 ```
 
 ## Common Tasks
 
-### Add support for new Pandoc block type
+### Add support for new Marko block type
 
 1. Read `docs/CLAUDE_ARCHITECTURE.md` for detailed handler patterns
-2. Find the block type in Pandoc AST documentation
-3. Add handler method `_handle_<blocktype>()` in `PandocToHwpx.py`
+2. Find the block type in Marko AST documentation
+3. Add handler method `_handle_<blocktype>()` in `converter.py`
 4. Register in `convert()` method's block processing loop
 
 ### Modify style handling
@@ -138,7 +135,7 @@ pypandoc-hwpx test.md -o test-from-md.hwpx
 
 ### Debug conversion issues
 
-1. Generate intermediate JSON: `pypandoc-hwpx input.md -o debug.json`
+1. Generate intermediate JSON: `md2hwpx input.md -o debug.json`
 2. Inspect AST structure for problematic content
 3. Add logging in specific handler methods
 
@@ -151,6 +148,7 @@ For detailed information, see:
 
 ## Known Limitations
 
-- Complex formatting (letter-spacing, precise styles) lost in Pandoc AST
+- Only Markdown input is supported (no DOCX, HTML, or JSON AST input)
+- Complex formatting (letter-spacing, precise styles) not supported
 - Some table layouts may not convert perfectly
 - Tool focuses on content preservation over exact formatting
