@@ -12,10 +12,11 @@ from PIL import Image
 
 
 class MarkdownToHwpx:
-    def __init__(self, json_ast=None, header_xml_content=None):
+    def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None):
         self.ast = json_ast
         self.output = []
         self.header_xml_content = header_xml_content
+        self.section_xml_content = section_xml_content
 
         # Default Style Mappings (Fallback)
         self.STYLE_MAP = {
@@ -32,6 +33,9 @@ class MarkdownToHwpx:
         self.dynamic_style_map = {}
         self.normal_style_id = 0
         self.normal_para_pr_id = 1
+
+        # Placeholder-based styles from template (e.g., {{H1}}, {{BODY}})
+        self.placeholder_styles = {}
 
         # XML Tree and CharPr Cache
         self.header_tree = None
@@ -54,6 +58,10 @@ class MarkdownToHwpx:
 
         if self.header_xml_content:
             self._parse_styles_and_init_xml(self.header_xml_content)
+
+        # Load placeholder styles from template section0.xml
+        if self.section_xml_content and self.header_root is not None:
+            self._load_placeholder_styles()
 
     def _extract_metadata(self):
         if not self.ast:
@@ -115,6 +123,7 @@ class MarkdownToHwpx:
 
         # 2. Read Reference (Header & Section0)
         header_xml_content = ""
+        section_xml_content = ""
         page_setup_xml = None
 
         with open(reference_path, 'rb') as f:
@@ -124,10 +133,12 @@ class MarkdownToHwpx:
             if "Contents/header.xml" in z.namelist():
                 header_xml_content = z.read("Contents/header.xml").decode('utf-8')
 
-            # Extract Page Setup from section0
+            # Read section0.xml for placeholder detection and page setup
             if "Contents/section0.xml" in z.namelist():
+                section_xml_content = z.read("Contents/section0.xml").decode('utf-8')
+
+                # Extract Page Setup from section0
                 try:
-                    sec_xml = z.read("Contents/section0.xml").decode('utf-8')
                     ns = {
                         'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
                         'hs': 'http://www.hancom.co.kr/hwpml/2011/section',
@@ -136,7 +147,7 @@ class MarkdownToHwpx:
                     for p, u in ns.items():
                          ET.register_namespace(p, u)
 
-                    sec_root = ET.fromstring(sec_xml)
+                    sec_root = ET.fromstring(section_xml_content)
                     first_para = sec_root.find('.//hp:p', ns)
                     if first_para is not None:
                         first_run = first_para.find('hp:run', ns)
@@ -151,8 +162,8 @@ class MarkdownToHwpx:
                 except Exception as e:
                     print(f"[Warn] Failed to extract Page Setup: {e}", file=sys.stderr)
 
-        # 3. Convert Logic
-        converter = MarkdownToHwpx(json_ast, header_xml_content)
+        # 3. Convert Logic (pass section_xml_content for placeholder detection)
+        converter = MarkdownToHwpx(json_ast, header_xml_content, section_xml_content)
         xml_body, new_header_xml = converter.convert(page_setup_xml=page_setup_xml)
 
         # 4. Write Output
@@ -447,6 +458,63 @@ class MarkdownToHwpx:
             print(f"[Error] Failed to parse/validate header.xml: {e}", file=sys.stderr)
             raise e
 
+    def _load_placeholder_styles(self):
+        """
+        Load placeholder-based styles from template section0.xml.
+
+        Finds text like {{H1}}, {{BODY}}, etc. and extracts their
+        charPrIDRef and paraPrIDRef for use during conversion.
+        """
+        if not self.section_xml_content:
+            return
+
+        try:
+            section_root = ET.fromstring(self.section_xml_content)
+            placeholders = self._find_placeholders(section_root)
+
+            for name, info in placeholders.items():
+                self.placeholder_styles[name] = {
+                    'charPrIDRef': info['charPrIDRef'],
+                    'paraPrIDRef': info['paraPrIDRef'],
+                }
+                print(f"[Debug] Found placeholder {{{{{name}}}}}: charPr={info['charPrIDRef']}, paraPr={info['paraPrIDRef']}")
+
+            if self.placeholder_styles:
+                print(f"[Debug] Loaded {len(self.placeholder_styles)} placeholder styles from template")
+        except Exception as e:
+            print(f"[Warn] Failed to load placeholder styles: {e}", file=sys.stderr)
+
+    def _find_placeholders(self, section_root):
+        """
+        Find {{PLACEHOLDER}} text in section0.xml.
+
+        Returns:
+            dict[name] -> {charPrIDRef, paraPrIDRef}
+        """
+        placeholders = {}
+        placeholder_pattern = re.compile(r'\{\{(\w+)\}\}')
+
+        # Find all paragraphs
+        for para in section_root.findall('.//hp:p', self.namespaces):
+            para_pr_id = para.get('paraPrIDRef', '0')
+
+            # Find all runs in this paragraph
+            for run in para.findall('hp:run', self.namespaces):
+                char_pr_id = run.get('charPrIDRef', '0')
+
+                # Find text elements
+                for text_elem in run.findall('hp:t', self.namespaces):
+                    if text_elem.text:
+                        match = placeholder_pattern.search(text_elem.text)
+                        if match:
+                            placeholder_name = match.group(1).upper()
+                            placeholders[placeholder_name] = {
+                                'charPrIDRef': char_pr_id,
+                                'paraPrIDRef': para_pr_id,
+                            }
+
+        return placeholders
+
     def convert(self, page_setup_xml=None):
         blocks = self.ast.get('blocks', [])
         # Process blocks to get section XML
@@ -552,14 +620,6 @@ class MarkdownToHwpx:
 
     def _handle_header(self, content):
         level = content[0]
-        text_content = content[2]
-        hwpx_level = level - 1
-
-        if hwpx_level not in self.dynamic_style_map:
-             raise ValueError(f"Requested Header Level {level} (HWPX Level {hwpx_level}) not found in header.xml style map.")
-
-        # content = [level, attr, inlines]
-        level = content[0]
         inlines = content[2]
 
         # Check for LineBreak at start for Column Break
@@ -570,23 +630,34 @@ class MarkdownToHwpx:
                 column_break_val = 1
                 inlines = inlines[1:] # Remove the LineBreak
 
-        # Map header level to style
-        # Validated Outline Levels: [0, 1, 2, 3, 4, 5, 6, 7, 8]
-        # Header 1 -> Style 1, Header 2 -> Style 2...
-        # If styles not present, fallback?
+        # Check for placeholder style first (e.g., {{H1}}, {{H2}}, etc.)
+        placeholder_name = f'H{level}'
+        if placeholder_name in self.placeholder_styles:
+            # Use placeholder-based styling
+            props = self.placeholder_styles[placeholder_name]
+            char_pr_id = props['charPrIDRef']
+            para_pr_id = props['paraPrIDRef']
+            # Use normal style ID but with placeholder's charPr/paraPr
+            style_id = self.normal_style_id
 
+            xml = self._create_para_start(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
+            xml += self._process_inlines(inlines, base_char_pr_id=char_pr_id)
+            xml += '</hp:p>'
+            return xml
+
+        # Fallback to existing style-based logic
+        hwpx_level = level - 1
+        if hwpx_level not in self.dynamic_style_map:
+             raise ValueError(f"Requested Header Level {level} (HWPX Level {hwpx_level}) not found in header.xml style map.")
+
+        # Map header level to style
         style_id = 0
         if level in self.outline_style_ids:
             style_id = self.outline_style_ids[level]
         else:
-             # Fallback to level if possible or 0
-             # Usually standard styles are ID 1..7 for outlines
-             # But we should rely on validated map
-             style_id = level # Hope for the best if not found?
-             pass
+             style_id = level
 
-        # Use associated paraPr if available?
-        # We need to find the paraPrIDRef for this style from header
+        # Use associated paraPr if available
         para_pr_id = self.normal_para_pr_id
         char_pr_id = 0
 
@@ -603,13 +674,18 @@ class MarkdownToHwpx:
         return xml
 
     def _handle_para(self, content):
-        # Infer normal style char_pr_id?
-        # Typically Normal style defines a charPrIDRef.
-        # We should look it up from self.normal_style_id logic.
-        # But we only grabbed normal_style_id and para_pr_id.
-        # We need normal_char_pr_id too.
+        # Check for BODY placeholder style first
+        if 'BODY' in self.placeholder_styles:
+            props = self.placeholder_styles['BODY']
+            char_pr_id = props['charPrIDRef']
+            para_pr_id = props['paraPrIDRef']
 
-        # Quick lookup for Normal Style CharPr
+            xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=para_pr_id)
+            xml += self._process_inlines(content, base_char_pr_id=char_pr_id)
+            xml += '</hp:p>'
+            return xml
+
+        # Fallback to existing logic
         normal_char_pr_id = 0
         if self.header_root is not None:
              style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
@@ -622,7 +698,18 @@ class MarkdownToHwpx:
         return xml
 
     def _handle_plain(self, content):
-        # Similar to Para
+        # Check for BODY placeholder style first (same as Para)
+        if 'BODY' in self.placeholder_styles:
+            props = self.placeholder_styles['BODY']
+            char_pr_id = props['charPrIDRef']
+            para_pr_id = props['paraPrIDRef']
+
+            xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=para_pr_id)
+            xml += self._process_inlines(content, base_char_pr_id=char_pr_id)
+            xml += '</hp:p>'
+            return xml
+
+        # Fallback to existing logic
         normal_char_pr_id = 0
         if self.header_root is not None:
              style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
