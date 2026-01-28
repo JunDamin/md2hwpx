@@ -10,6 +10,12 @@ import xml.sax.saxutils as saxutils
 import xml.etree.ElementTree as ET
 from PIL import Image
 
+# XML Namespaces for HWPX format
+NS_HEAD = 'http://www.hancom.co.kr/hwpml/2011/head'
+NS_PARA = 'http://www.hancom.co.kr/hwpml/2011/paragraph'
+NS_CORE = 'http://www.hancom.co.kr/hwpml/2011/core'
+NS_SEC = 'http://www.hancom.co.kr/hwpml/2011/section'
+
 
 class MarkdownToHwpx:
     def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None):
@@ -608,20 +614,74 @@ class MarkdownToHwpx:
         return "\n".join(result)
 
     def _escape_text(self, text):
+        """Escape text content for XML elements."""
         return saxutils.escape(text)
 
+    def _escape_attr(self, value):
+        """Escape value for use in XML attributes (handles &, <, >, ", ')."""
+        if value is None:
+            return ''
+        return saxutils.escape(str(value), {'"': '&quot;', "'": '&apos;'})
+
+    # --- XML Element Builder Helpers ---
+
+    def _make_elem(self, ns, tag, attrib=None, text=None):
+        """Create XML element with namespace."""
+        elem = ET.Element(f'{{{ns}}}{tag}', attrib or {})
+        if text is not None:
+            elem.text = str(text)
+        return elem
+
+    def _add_elem(self, parent, ns, tag, attrib=None, text=None):
+        """Add child element to parent."""
+        elem = ET.SubElement(parent, f'{{{ns}}}{tag}', attrib or {})
+        if text is not None:
+            elem.text = str(text)
+        return elem
+
+    def _elem_to_str(self, elem):
+        """Convert element to XML string."""
+        return ET.tostring(elem, encoding='unicode')
+
+    # --- Paragraph/Run Element Creators ---
+
+    def _create_para_elem(self, style_id=0, para_pr_id=1, column_break=0, merged=0):
+        """Create paragraph element."""
+        return self._make_elem(NS_PARA, 'p', {
+            'paraPrIDRef': str(para_pr_id),
+            'styleIDRef': str(style_id),
+            'pageBreak': '0',
+            'columnBreak': str(column_break),
+            'merged': str(merged)
+        })
+
+    def _create_run_elem(self, char_pr_id=0):
+        """Create run element."""
+        return self._make_elem(NS_PARA, 'run', {'charPrIDRef': str(char_pr_id)})
+
+    def _create_text_elem(self, text):
+        """Create text element with escaped content."""
+        return self._make_elem(NS_PARA, 't', text=text)
+
+    def _create_text_run_elem(self, text, char_pr_id=0):
+        """Create run element containing text."""
+        run = self._create_run_elem(char_pr_id)
+        self._add_elem(run, NS_PARA, 't', text=text)
+        return run
+
+    # --- Legacy String-Based Methods (for backward compatibility during refactoring) ---
+
     def _create_para_start(self, style_id=0, para_pr_id=1, column_break=0, merged=0):
-        # merged=0 is default
-        return f'<hp:p paraPrIDRef="{para_pr_id}" styleIDRef="{style_id}" pageBreak="0" columnBreak="{column_break}" merged="{merged}">'
+        """Create paragraph opening tag (legacy string method)."""
+        return self._elem_to_str(self._create_para_elem(style_id, para_pr_id, column_break, merged)).replace('/>', '>')
 
     def _create_run_start(self, char_pr_id=0):
-        return f'<hp:run charPrIDRef="{char_pr_id}">'
+        """Create run opening tag (legacy string method)."""
+        return self._elem_to_str(self._create_run_elem(char_pr_id)).replace('/>', '>')
 
     def _create_text_run(self, text, char_pr_id=0):
-        run_xml = self._create_run_start(char_pr_id)
-        run_xml += f'<hp:t>{self._escape_text(text)}</hp:t>'
-        run_xml += '</hp:run>'
-        return run_xml
+        """Create text run as string (legacy string method)."""
+        return self._elem_to_str(self._create_text_run_elem(text, char_pr_id))
 
     def _handle_header(self, content):
         level = content[0]
@@ -633,50 +693,45 @@ class MarkdownToHwpx:
             first_item = inlines[0]
             if first_item.get('t') == 'LineBreak':
                 column_break_val = 1
-                inlines = inlines[1:] # Remove the LineBreak
+                inlines = inlines[1:]  # Remove the LineBreak
 
         # Check for placeholder style first (e.g., {{H1}}, {{H2}}, etc.)
         placeholder_name = f'H{level}'
         if placeholder_name in self.placeholder_styles:
-            # Use placeholder-based styling
             props = self.placeholder_styles[placeholder_name]
             char_pr_id = props['charPrIDRef']
             para_pr_id = props['paraPrIDRef']
-            # Use normal style ID but with placeholder's charPr/paraPr
             style_id = self.normal_style_id
 
-            xml = self._create_para_start(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
-            xml += self._process_inlines(inlines, base_char_pr_id=char_pr_id)
-            xml += '</hp:p>'
-            return xml
+            para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
+            self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
+            return self._elem_to_str(para)
 
         # Fallback to existing style-based logic
         hwpx_level = level - 1
         if hwpx_level not in self.dynamic_style_map:
-             raise ValueError(f"Requested Header Level {level} (HWPX Level {hwpx_level}) not found in header.xml style map.")
+            raise ValueError(f"Requested Header Level {level} (HWPX Level {hwpx_level}) not found in header.xml style map.")
 
         # Map header level to style
         style_id = 0
         if level in self.outline_style_ids:
             style_id = self.outline_style_ids[level]
         else:
-             style_id = level
+            style_id = level
 
         # Use associated paraPr if available
         para_pr_id = self.normal_para_pr_id
         char_pr_id = 0
 
         if self.header_root is not None:
-             style_node = self.header_root.find(f'.//hh:style[@id="{style_id}"]', self.namespaces)
-             if style_node is not None:
-                 para_pr_id = style_node.get('paraPrIDRef', 0)
-                 char_pr_id = style_node.get('charPrIDRef', 0)
+            style_node = self.header_root.find(f'.//hh:style[@id="{style_id}"]', self.namespaces)
+            if style_node is not None:
+                para_pr_id = style_node.get('paraPrIDRef', 0)
+                char_pr_id = style_node.get('charPrIDRef', 0)
 
-        xml = self._create_para_start(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
-        xml += self._process_inlines(inlines, base_char_pr_id=char_pr_id)
-        xml += '</hp:p>'
-
-        return xml
+        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
+        self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
+        return self._elem_to_str(para)
 
     def _handle_para(self, content):
         # Check for BODY placeholder style first
@@ -685,22 +740,20 @@ class MarkdownToHwpx:
             char_pr_id = props['charPrIDRef']
             para_pr_id = props['paraPrIDRef']
 
-            xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=para_pr_id)
-            xml += self._process_inlines(content, base_char_pr_id=char_pr_id)
-            xml += '</hp:p>'
-            return xml
+            para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=para_pr_id)
+            self._process_inlines_to_elems(content, para, base_char_pr_id=int(char_pr_id))
+            return self._elem_to_str(para)
 
         # Fallback to existing logic
         normal_char_pr_id = 0
         if self.header_root is not None:
-             style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
-             if style_node is not None:
-                 normal_char_pr_id = style_node.get('charPrIDRef', 0)
+            style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
+            if style_node is not None:
+                normal_char_pr_id = style_node.get('charPrIDRef', 0)
 
-        xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
-        xml += self._process_inlines(content, base_char_pr_id=normal_char_pr_id)
-        xml += '</hp:p>'
-        return xml
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
+        self._process_inlines_to_elems(content, para, base_char_pr_id=int(normal_char_pr_id))
+        return self._elem_to_str(para)
 
     def _handle_plain(self, content):
         # Check for BODY placeholder style first (same as Para)
@@ -709,44 +762,32 @@ class MarkdownToHwpx:
             char_pr_id = props['charPrIDRef']
             para_pr_id = props['paraPrIDRef']
 
-            xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=para_pr_id)
-            xml += self._process_inlines(content, base_char_pr_id=char_pr_id)
-            xml += '</hp:p>'
-            return xml
+            para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=para_pr_id)
+            self._process_inlines_to_elems(content, para, base_char_pr_id=int(char_pr_id))
+            return self._elem_to_str(para)
 
         # Fallback to existing logic
         normal_char_pr_id = 0
         if self.header_root is not None:
-             style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
-             if style_node is not None:
-                 normal_char_pr_id = style_node.get('charPrIDRef', 0)
+            style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
+            if style_node is not None:
+                normal_char_pr_id = style_node.get('charPrIDRef', 0)
 
-        xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
-        xml += self._process_inlines(content, base_char_pr_id=normal_char_pr_id)
-        xml += '</hp:p>'
-        return xml
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
+        self._process_inlines_to_elems(content, para, base_char_pr_id=int(normal_char_pr_id))
+        return self._elem_to_str(para)
 
     def _handle_code_block(self, content):
         # Code formatting? IDK...
         code = content[1]
-        xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
-        xml += self._create_text_run(code)
-        xml += '</hp:p>'
-        return xml
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
+        run = self._create_text_run_elem(code)
+        para.append(run)
+        return self._elem_to_str(para)
 
-    def _handle_table(self, content):
+    def _handle_table_elem(self, content):
+        """Handle table block and return Element (ElementTree version)."""
         # content = [attr, caption, specs, table_head, table_body, table_foot]
-        # Pandoc JSON structure for Table is complex and changes between versions.
-        # Assuming standard Pandoc JSON (recent):
-        # [attr, caption, specs, table_head, table_body, table_foot]
-
-        # attr: [id, [classes], [[key, val]]]
-        # caption: [short_caption, blocks]
-        # specs: [[align, col_width], ...]
-        # table_head: [attr, [row, ...]]
-        # table_body: [ [attr, row_head_columns, [row, ...], [row, ...]] ] (List of bodies)
-        # table_foot: [attr, [row, ...]]
-
         # Row: [attr, [cell, ...]]
         # Cell: [attr, align, rowspan, colspan, [blocks]]
 
@@ -755,28 +796,22 @@ class MarkdownToHwpx:
         table_bodies = content[4]
         table_foot = content[5]
 
-        # 1. Flatten Rows
-        # Collect all rows from head, bodies, foot to determine total row count and structure
+        # Flatten Rows from head, bodies, foot
         all_rows = []
 
         # Head Rows
-        head_rows = table_head[1] # list of rows
+        head_rows = table_head[1]
         for row in head_rows:
             all_rows.append(row)
 
-            # Body Rows (Bodies is a list of bodies)
+        # Body Rows
         for body in table_bodies:
-            # body = [attr, row_head_columns, intermediate_headers, main_rows]
-
-            # Intermediate Headers (if any)
             inter_headers = body[2]
             for row in inter_headers:
-                 all_rows.append(row)
-
-            # Main Rows
+                all_rows.append(row)
             main_rows = body[3]
             for row in main_rows:
-                 all_rows.append(row)
+                all_rows.append(row)
 
         # Foot Rows
         foot_rows = table_foot[1]
@@ -784,118 +819,150 @@ class MarkdownToHwpx:
             all_rows.append(row)
 
         if not all_rows:
-            return ""
+            return None
 
         row_cnt = len(all_rows)
         col_cnt = len(specs)
 
-        # 2. Calculate Widths
-        # Total Page Width approx 45000 - margins. Let's assume 30000-40000 range.
-        # Sample uses total ~45000.
+        # Calculate Widths
         TOTAL_TABLE_WIDTH = 45000
-        col_widths = []
+        col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
 
-        for spec in specs:
-            # spec = [align, width_info]
-            # width_info is specific format (e.g. {"t": "ColWidthDefault"}) or explicit float
-            # If float, it's relative?
-            # Let's simplify: split evenly if unknown
-            col_widths.append(int(TOTAL_TABLE_WIDTH / col_cnt))
-
-        # 3. Generate Table XML
+        # Generate IDs
         import time
         import random
         tbl_id = str(int(time.time() * 1000) % 100000000 + random.randint(0, 10000))
 
-        xml_parts = []
+        # Create paragraph > run > table structure
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
+        run = self._add_elem(para, NS_PARA, 'run', {'charPrIDRef': '0'})
 
-        # Table Start
-        # We need to wrap table in a Run/Para structure?
-        # Yes, Table is an inline character-like object in HWPX (like image).
-        # <hp:p><hp:run><hp:tbl ...>...</hp:tbl></hp:run></hp:p>
-
-        # Para Start
-        xml_parts.append(self._create_para_start(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id))
-        xml_parts.append(self._create_run_start(char_pr_id=0)) # Table run charPr=0 usually
+        # Table element
+        tbl = self._add_elem(run, NS_PARA, 'tbl', {
+            'id': tbl_id,
+            'zOrder': '0',
+            'numberingType': 'TABLE',
+            'textWrap': 'TOP_AND_BOTTOM',
+            'textFlow': 'BOTH_SIDES',
+            'lock': '0',
+            'dropcapstyle': 'None',
+            'pageBreak': 'CELL',
+            'repeatHeader': '1',
+            'rowCnt': str(row_cnt),
+            'colCnt': str(col_cnt),
+            'cellSpacing': '0',
+            'borderFillIDRef': '3',
+            'noAdjust': '0'
+        })
 
         # Table properties
-        xml_parts.append(f'<hp:tbl id="{tbl_id}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="{row_cnt}" colCnt="{col_cnt}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">')
+        self._add_elem(tbl, NS_PARA, 'sz', {
+            'width': str(TOTAL_TABLE_WIDTH),
+            'widthRelTo': 'ABSOLUTE',
+            'height': str(row_cnt * 1000),
+            'heightRelTo': 'ABSOLUTE',
+            'protect': '0'
+        })
+        self._add_elem(tbl, NS_PARA, 'pos', {
+            'treatAsChar': '0',
+            'affectLSpacing': '0',
+            'flowWithText': '1',
+            'allowOverlap': '0',
+            'holdAnchorAndSO': '0',
+            'vertRelTo': 'PARA',
+            'horzRelTo': 'COLUMN',
+            'vertAlign': 'TOP',
+            'horzAlign': 'LEFT',
+            'vertOffset': '0',
+            'horzOffset': '0'
+        })
+        self._add_elem(tbl, NS_PARA, 'outMargin', {'left': '0', 'right': '0', 'top': '0', 'bottom': '1417'})
+        self._add_elem(tbl, NS_PARA, 'inMargin', {'left': '510', 'right': '510', 'top': '141', 'bottom': '141'})
 
-        # Dimensions
-        xml_parts.append(f'<hp:sz width="{TOTAL_TABLE_WIDTH}" widthRelTo="ABSOLUTE" height="{row_cnt * 1000}" heightRelTo="ABSOLUTE" protect="0"/>')
-        xml_parts.append('<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>')
-        xml_parts.append('<hp:outMargin left="0" right="0" top="0" bottom="1417"/>')
-        xml_parts.append('<hp:inMargin left="510" right="510" top="141" bottom="141"/>')
-
-        # 4. Generate Rows
-        occupied_cells = set() # (row, col)
+        # Generate Rows
+        occupied_cells = set()
         curr_row_addr = 0
 
         for row in all_rows:
-            # Row = [attr, [cell, ...]]
             cells = row[1]
-
-            xml_parts.append('<hp:tr>')
+            tr = self._add_elem(tbl, NS_PARA, 'tr')
 
             curr_col_addr = 0
             for cell in cells:
-                # Find next free column by skipping occupied cells
+                # Find next free column
                 while (curr_row_addr, curr_col_addr) in occupied_cells:
                     curr_col_addr += 1
 
                 actual_col = curr_col_addr
 
-                # Cell = [attr, align, rowspan, colspan, [blocks]]
-                # Pandoc cell structure: [attr, align, rowspan, colspan, blocks]
                 rowspan = cell[2]
                 colspan = cell[3]
                 cell_blocks = cell[4]
 
-                # Mark occupied cells for this span
+                # Mark occupied cells
                 for r in range(rowspan):
                     for c in range(colspan):
                         occupied_cells.add((curr_row_addr + r, actual_col + c))
 
-                # Calculate cell width based on colspan
-                # Sum widths of columns covered
-                cell_width = 0
-                for i in range(colspan):
-                    if actual_col + i < len(col_widths):
-                        cell_width += col_widths[actual_col + i]
-                    else:
-                        cell_width += int(TOTAL_TABLE_WIDTH / col_cnt)
+                # Calculate cell width
+                cell_width = sum(
+                    col_widths[actual_col + i] if actual_col + i < len(col_widths)
+                    else int(TOTAL_TABLE_WIDTH / col_cnt)
+                    for i in range(colspan)
+                )
 
                 sublist_id = str(int(time.time() * 100000) % 1000000000 + random.randint(0, 100000))
 
+                # Cell element
+                tc = self._add_elem(tr, NS_PARA, 'tc', {
+                    'name': '',
+                    'header': '0',
+                    'hasMargin': '0',
+                    'protect': '0',
+                    'editable': '0',
+                    'dirty': '0',
+                    'borderFillIDRef': str(self.table_border_fill_id)
+                })
+
+                # SubList with content
+                sublist = self._add_elem(tc, NS_PARA, 'subList', {
+                    'id': sublist_id,
+                    'textDirection': 'HORIZONTAL',
+                    'lineWrap': 'BREAK',
+                    'vertAlign': 'TOP',
+                    'linkListIDRef': '0',
+                    'linkListNextIDRef': '0',
+                    'textWidth': '0',
+                    'textHeight': '0',
+                    'hasTextRef': '0',
+                    'hasNumRef': '0'
+                })
+
+                # Process cell blocks and add to sublist
                 cell_content_xml = self._process_blocks(cell_blocks)
+                if cell_content_xml.strip():
+                    wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{cell_content_xml}</root>'
+                    for elem in ET.fromstring(wrapper):
+                        sublist.append(elem)
 
-                # TC Start
-                xml_parts.append(f'<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="{self.table_border_fill_id}">')
+                # Cell properties
+                self._add_elem(tc, NS_PARA, 'cellAddr', {'colAddr': str(actual_col), 'rowAddr': str(curr_row_addr)})
+                self._add_elem(tc, NS_PARA, 'cellSpan', {'colSpan': str(colspan), 'rowSpan': str(rowspan)})
+                self._add_elem(tc, NS_PARA, 'cellSz', {'width': str(cell_width), 'height': '1000'})
+                self._add_elem(tc, NS_PARA, 'cellMargin', {'left': '510', 'right': '510', 'top': '141', 'bottom': '141'})
 
-                # SubList
-                xml_parts.append(f'<hp:subList id="{sublist_id}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">')
-                xml_parts.append(cell_content_xml)
-                xml_parts.append('</hp:subList>')
-
-                # Cell Address & Span
-                xml_parts.append(f'<hp:cellAddr colAddr="{actual_col}" rowAddr="{curr_row_addr}"/>')
-                xml_parts.append(f'<hp:cellSpan colSpan="{colspan}" rowSpan="{rowspan}"/>')
-                xml_parts.append(f'<hp:cellSz width="{cell_width}" height="1000"/>')
-                xml_parts.append('<hp:cellMargin left="510" right="510" top="141" bottom="141"/>')
-
-                xml_parts.append('</hp:tc>')
-
-                # Advance current column by the span of this cell in the current row
                 curr_col_addr += colspan
 
-            xml_parts.append('</hp:tr>')
             curr_row_addr += 1
 
-        xml_parts.append('</hp:tbl>')
-        xml_parts.append('</hp:run>')
-        xml_parts.append('</hp:p>')
+        return para
 
-        return "".join(xml_parts)
+    def _handle_table(self, content):
+        """Handle table block (legacy wrapper)."""
+        elem = self._handle_table_elem(content)
+        if elem is None:
+            return ""
+        return self._elem_to_str(elem)
 
     # --- INLINE PROCESSING & FORMATTING ---
 
@@ -982,15 +1049,116 @@ class MarkdownToHwpx:
                 results.append(self._create_text_run(" ", char_pr_id=get_current_id()))
 
             elif i_type == 'LineBreak':
-                 run_xml = self._create_run_start(char_pr_id=get_current_id())
-                 run_xml += "<hp:t><hp:lineBreak/></hp:t></hp:run>"
-                 results.append(run_xml)
+                 run = self._create_run_elem(char_pr_id=get_current_id())
+                 t_elem = self._add_elem(run, NS_PARA, 't')
+                 self._add_elem(t_elem, NS_PARA, 'lineBreak')
+                 results.append(self._elem_to_str(run))
 
             else:
                 # Fallback
                  pass
 
         return "".join(results)
+
+    def _create_linebreak_run_elem(self, char_pr_id=0):
+        """Create a run element containing a line break."""
+        run = self._create_run_elem(char_pr_id)
+        t_elem = self._add_elem(run, NS_PARA, 't')
+        self._add_elem(t_elem, NS_PARA, 'lineBreak')
+        return run
+
+    def _process_inlines_to_elems(self, inlines, parent_elem, base_char_pr_id=0, active_formats=None):
+        """Process inline elements and append them to parent element.
+
+        This is the Element-based version of _process_inlines.
+        Instead of returning a string, it appends run elements directly to parent.
+        """
+        if not isinstance(inlines, list):
+            return
+
+        if active_formats is None:
+            active_formats = set()
+
+        def get_current_id():
+            return self._get_char_pr_id(base_char_pr_id, active_formats)
+
+        for item in inlines:
+            i_type = item.get('t')
+            i_content = item.get('c')
+
+            if i_type == 'Str':
+                run = self._create_text_run_elem(i_content, char_pr_id=get_current_id())
+                parent_elem.append(run)
+
+            elif i_type == 'Space':
+                run = self._create_text_run_elem(" ", char_pr_id=get_current_id())
+                parent_elem.append(run)
+
+            elif i_type == 'Strong':
+                new_formats = active_formats.copy()
+                new_formats.add('BOLD')
+                self._process_inlines_to_elems(i_content, parent_elem, base_char_pr_id, new_formats)
+
+            elif i_type == 'Emph':
+                new_formats = active_formats.copy()
+                new_formats.add('ITALIC')
+                self._process_inlines_to_elems(i_content, parent_elem, base_char_pr_id, new_formats)
+
+            elif i_type == 'Underline':
+                new_formats = active_formats.copy()
+                new_formats.add('UNDERLINE')
+                self._process_inlines_to_elems(i_content, parent_elem, base_char_pr_id, new_formats)
+
+            elif i_type == 'Superscript':
+                new_formats = active_formats.copy()
+                new_formats.add('SUPERSCRIPT')
+                self._process_inlines_to_elems(i_content, parent_elem, base_char_pr_id, new_formats)
+
+            elif i_type == 'Subscript':
+                new_formats = active_formats.copy()
+                new_formats.add('SUBSCRIPT')
+                self._process_inlines_to_elems(i_content, parent_elem, base_char_pr_id, new_formats)
+
+            elif i_type == 'Link':
+                text_inlines = i_content[1]
+                target_url = i_content[2][0]
+
+                # Add field begin element
+                parent_elem.append(self._create_field_begin_elem(target_url))
+
+                # Add link text with styling
+                new_formats = active_formats.copy()
+                new_formats.add('UNDERLINE')
+                new_formats.add('COLOR_BLUE')
+                self._process_inlines_to_elems(text_inlines, parent_elem, base_char_pr_id, new_formats)
+
+                # Add field end element
+                parent_elem.append(self._create_field_end_elem())
+
+            elif i_type == 'Note':
+                note_blocks = i_content
+                # Use legacy method for now
+                note_xml = self._create_footnote(note_blocks)
+                for elem in ET.fromstring(f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{note_xml}</root>'):
+                    parent_elem.append(elem)
+
+            elif i_type == 'Code':
+                run = self._create_text_run_elem(i_content[1], char_pr_id=get_current_id())
+                parent_elem.append(run)
+
+            elif i_type == 'Image':
+                # Use legacy method for now
+                img_xml = self._handle_image(i_content, char_pr_id=get_current_id())
+                for elem in ET.fromstring(f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{img_xml}</root>'):
+                    parent_elem.append(elem)
+
+            elif i_type == 'SoftBreak':
+                run = self._create_text_run_elem(" ", char_pr_id=get_current_id())
+                parent_elem.append(run)
+
+            elif i_type == 'LineBreak':
+                run = self._create_linebreak_run_elem(char_pr_id=get_current_id())
+                parent_elem.append(run)
 
     def _parse_dimension(self, val_str):
         if not val_str:
@@ -1040,105 +1208,78 @@ class MarkdownToHwpx:
 
         return int(mm_val * LUNIT_PER_MM)
 
-    def _handle_image(self, content, char_pr_id=0):
+    def _handle_image_elem(self, content, char_pr_id=0):
+        """Handle image inline and return Element (ElementTree version)."""
         # content = [attr, caption, [target, title]]
         # attr: [id, [classes], [[key, val]]]
         attr = content[0]
-        caption = content[1] # list of inlines
+        caption = content[1]  # list of inlines
         target = content[2]
 
         target_url = target[0]
-        # title = target[1]
 
         # Parse Attributes for Width/Height
-        # attr[2] is list of key-val pairs
         attrs_map = dict(attr[2])
 
         width_attr = attrs_map.get('width')
         height_attr = attrs_map.get('height')
 
         # Default Size
-        width_hwp = 8504 # ~30mm (30 * 283.465)
+        width_hwp = 8504  # ~30mm (30 * 283.465)
         height_hwp = 8504
 
         w_parsed = self._parse_dimension(width_attr)
         h_parsed = self._parse_dimension(height_attr)
 
         # --- Pillow Auto-Sizing & Max Width Logic ---
-
-        # 1. Determine Pixel Size (from AST or File)
         px_width = 0
         px_height = 0
-
-        has_size = False
-
-        # If AST has sizes, use them (assuming they are valid)
-        # Note: _parse_dimension returns HWP units.
-        # But for ratio calculation, we might want pixels.
-        # Actually, let's stick to HWP units if available.
 
         if w_parsed and h_parsed:
             width_hwp = w_parsed
             height_hwp = h_parsed
-            has_size = True
         elif w_parsed:
-             # Only width known. We need aspect ratio to calculate height.
-             # If we can't read file, we make it square as fallback.
-             width_hwp = w_parsed
-             pass # Will try to read file for AR if possible, else square.
+            width_hwp = w_parsed
 
         # If size missing or partial, try reading file
         should_read_file = (not w_parsed) or (not h_parsed)
 
         if should_read_file:
-             # Try to find the image file for dimension detection
-             image_found = False
-             try:
-                 candidates = [target_url]
-                 # Add path relative to input file directory
-                 if self.input_dir:
-                     candidates.append(os.path.join(self.input_dir, target_url))
+            image_found = False
+            try:
+                candidates = [target_url]
+                if self.input_dir:
+                    candidates.append(os.path.join(self.input_dir, target_url))
 
-                 for cand in candidates:
-                     if os.path.exists(cand):
-                         with Image.open(cand) as im:
-                             px_width, px_height = im.size
-                             image_found = True
-                         break
-             except Exception as e:
-                 # print(f"[Debug] Pillow failed to read {target_url}: {e}")
-                 pass
+                for cand in candidates:
+                    if os.path.exists(cand):
+                        with Image.open(cand) as im:
+                            px_width, px_height = im.size
+                            image_found = True
+                        break
+            except Exception:
+                pass
 
-             if image_found:
-                 # Convert PX to HWP Units (96 DPI standard)
-                 # 1 px = 283.465 * 25.4 / 96 = 75 approx?
-                 # 1 inch = 72000 HWP Units (approx, actually 25.4mm = 7200 LUnits? No)
-                 # HWP Unit: 1mm = 283.465.
-                 # 96 px = 1 inch = 25.4 mm = 7200.011 LUnits
-                 # 1 px = 7200.011 / 96 = 75.0001 LUnits
+            if image_found:
+                LUNIT_PER_PX = (25.4 * 283.465) / 96.0
 
-                 LUNIT_PER_PX = (25.4 * 283.465) / 96.0
+                calc_w = int(px_width * LUNIT_PER_PX)
+                calc_h = int(px_height * LUNIT_PER_PX)
 
-                 calc_w = int(px_width * LUNIT_PER_PX)
-                 calc_h = int(px_height * LUNIT_PER_PX)
-
-                 if not w_parsed and not h_parsed:
-                     width_hwp = calc_w
-                     height_hwp = calc_h
-                 elif w_parsed and not h_parsed:
-                     # Calculate height from Width (maintain AR)
-                     ratio = px_height / px_width
-                     height_hwp = int(w_parsed * ratio)
-                 elif not w_parsed and h_parsed:
-                     # Calculate width from Height
-                     ratio = px_width / px_height
-                     width_hwp = int(h_parsed * ratio)
+                if not w_parsed and not h_parsed:
+                    width_hwp = calc_w
+                    height_hwp = calc_h
+                elif w_parsed and not h_parsed:
+                    ratio = px_height / px_width
+                    height_hwp = int(w_parsed * ratio)
+                elif not w_parsed and h_parsed:
+                    ratio = px_width / px_height
+                    width_hwp = int(h_parsed * ratio)
 
         # --- Max Width Constraint (15cm) ---
-        MAX_WIDTH_HWP = int(150 * 283.465) # 150mm = 15cm approx 42520
+        MAX_WIDTH_HWP = int(150 * 283.465)
 
         if width_hwp > MAX_WIDTH_HWP:
-            # Scale down
             ratio = MAX_WIDTH_HWP / width_hwp
             width_hwp = MAX_WIDTH_HWP
             height_hwp = int(height_hwp * ratio)
@@ -1146,7 +1287,7 @@ class MarkdownToHwpx:
         width = width_hwp
         height = height_hwp
 
-        # 1. Generate Binary ID
+        # Generate Binary ID
         import time
         import random
 
@@ -1154,8 +1295,8 @@ class MarkdownToHwpx:
         rand = random.randint(0, 1000000)
         binary_item_id = f"img_{timestamp}_{rand}"
 
-        # 2. Extract Extension
-        ext = "png" # default
+        # Extract Extension
+        ext = "png"
         lower_url = target_url.lower()
         if lower_url.endswith('.jpg') or lower_url.endswith('.jpeg'):
             ext = "jpg"
@@ -1164,136 +1305,196 @@ class MarkdownToHwpx:
         elif lower_url.endswith('.bmp'):
             ext = "bmp"
 
-        # 3. Store for convert.py
+        # Store for output
         self.images.append({
             'id': binary_item_id,
             'path': target_url,
             'ext': ext
         })
 
-        # 4. Generate XML
+        # Generate Element
         pic_id = str(timestamp % 100000000 + rand)
         inst_id = str(random.randint(10000000, 99999999))
 
-        xml_parts = []
-        xml_parts.append(f'<hp:run charPrIDRef="{char_pr_id}">')
-        xml_parts.append(f'<hp:pic id="{pic_id}" zOrder="0" numberingType="NONE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="{inst_id}" reverse="0">')
+        run = self._create_run_elem(char_pr_id)
 
-        xml_parts.append(f'<hp:offset x="0" y="0"/>')
-        xml_parts.append(f'<hp:orgSz width="{width}" height="{height}"/>')
-        xml_parts.append(f'<hp:curSz width="{width}" height="{height}"/>')
-        xml_parts.append('<hp:flip horizontal="0" vertical="0"/>')
-        xml_parts.append('<hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>')
-        xml_parts.append('<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>')
+        pic = self._add_elem(run, NS_PARA, 'pic', {
+            'id': pic_id,
+            'zOrder': '0',
+            'numberingType': 'NONE',
+            'textWrap': 'TOP_AND_BOTTOM',
+            'textFlow': 'BOTH_SIDES',
+            'lock': '0',
+            'dropcapstyle': 'None',
+            'href': '',
+            'groupLevel': '0',
+            'instid': inst_id,
+            'reverse': '0'
+        })
 
-        xml_parts.append(f'<hc:img binaryItemIDRef="{binary_item_id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>')
+        self._add_elem(pic, NS_PARA, 'offset', {'x': '0', 'y': '0'})
+        self._add_elem(pic, NS_PARA, 'orgSz', {'width': str(width), 'height': str(height)})
+        self._add_elem(pic, NS_PARA, 'curSz', {'width': str(width), 'height': str(height)})
+        self._add_elem(pic, NS_PARA, 'flip', {'horizontal': '0', 'vertical': '0'})
+        self._add_elem(pic, NS_PARA, 'rotationInfo', {
+            'angle': '0', 'centerX': '0', 'centerY': '0', 'rotateimage': '1'
+        })
 
-        xml_parts.append('<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="{w}" y="0"/><hc:pt2 x="{w}" y="{h}"/><hc:pt3 x="0" y="{h}"/></hp:imgRect>'.format(w=width, h=height))
-        xml_parts.append('<hp:imgClip left="0" right="0" top="0" bottom="0"/>')
-        xml_parts.append('<hp:inMargin left="0" right="0" top="0" bottom="0"/>')
-        xml_parts.append('<hp:imgDim dimwidth="0" dimheight="0"/>')
-        xml_parts.append('<hp:effects/>')
+        # renderingInfo with matrices
+        render_info = self._add_elem(pic, NS_PARA, 'renderingInfo')
+        for matrix_name in ['transMatrix', 'scaMatrix', 'rotMatrix']:
+            self._add_elem(render_info, NS_CORE, matrix_name, {
+                'e1': '1', 'e2': '0', 'e3': '0', 'e4': '0', 'e5': '1', 'e6': '0'
+            })
 
-        xml_parts.append(f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{height}" heightRelTo="ABSOLUTE" protect="0"/>')
-        xml_parts.append('<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>')
-        xml_parts.append('<hp:outMargin left="0" right="0" top="0" bottom="0"/>')
-        xml_parts.append('<hp:shapeComment/>')
+        # img element (in core namespace)
+        self._add_elem(pic, NS_CORE, 'img', {
+            'binaryItemIDRef': binary_item_id,
+            'bright': '0',
+            'contrast': '0',
+            'effect': 'REAL_PIC',
+            'alpha': '0'
+        })
 
-        xml_parts.append('</hp:pic>')
-        xml_parts.append('</hp:run>')
+        # imgRect with corner points
+        img_rect = self._add_elem(pic, NS_PARA, 'imgRect')
+        self._add_elem(img_rect, NS_CORE, 'pt0', {'x': '0', 'y': '0'})
+        self._add_elem(img_rect, NS_CORE, 'pt1', {'x': str(width), 'y': '0'})
+        self._add_elem(img_rect, NS_CORE, 'pt2', {'x': str(width), 'y': str(height)})
+        self._add_elem(img_rect, NS_CORE, 'pt3', {'x': '0', 'y': str(height)})
 
-        return "".join(xml_parts)
+        self._add_elem(pic, NS_PARA, 'imgClip', {'left': '0', 'right': '0', 'top': '0', 'bottom': '0'})
+        self._add_elem(pic, NS_PARA, 'inMargin', {'left': '0', 'right': '0', 'top': '0', 'bottom': '0'})
+        self._add_elem(pic, NS_PARA, 'imgDim', {'dimwidth': '0', 'dimheight': '0'})
+        self._add_elem(pic, NS_PARA, 'effects')
 
+        self._add_elem(pic, NS_PARA, 'sz', {
+            'width': str(width),
+            'widthRelTo': 'ABSOLUTE',
+            'height': str(height),
+            'heightRelTo': 'ABSOLUTE',
+            'protect': '0'
+        })
+        self._add_elem(pic, NS_PARA, 'pos', {
+            'treatAsChar': '1',
+            'affectLSpacing': '0',
+            'flowWithText': '1',
+            'allowOverlap': '1',
+            'holdAnchorAndSO': '0',
+            'vertRelTo': 'PARA',
+            'horzRelTo': 'COLUMN',
+            'vertAlign': 'TOP',
+            'horzAlign': 'LEFT',
+            'vertOffset': '0',
+            'horzOffset': '0'
+        })
+        self._add_elem(pic, NS_PARA, 'outMargin', {'left': '0', 'right': '0', 'top': '0', 'bottom': '0'})
+        self._add_elem(pic, NS_PARA, 'shapeComment')
 
-        return "".join(results)
+        return run
 
-    def _create_field_begin(self, url):
-        # Generate generic IDs for field
-        # Ideally should be unique but for now let's generate random or sequential
-        # We need a field ID counter?
-        # Let's use max_char_pr_id + random?
-        # Actually field IDs usually large integers.
-        # Let's just use a hash or simple counter.
+    def _handle_image(self, content, char_pr_id=0):
+        """Handle image inline (legacy wrapper)."""
+        return self._elem_to_str(self._handle_image_elem(content, char_pr_id))
+
+    def _create_field_begin_elem(self, url):
+        """Create field begin element for hyperlink (ElementTree version)."""
         import time
         fid = str(int(time.time() * 1000) % 100000000)
+        self.last_field_id = fid
 
-        # We need a method to pair Begin/End.
-        # Storing in self?
-        # Since _process_inlines is recursive, we can return the end tag immediately?
-        # But _create_field_end needs to know the beginID if we want to be strict?
-        # HWPX spec: fieldEnd beginIDRef="..."
-
-        self.last_field_id = fid # storing for simple pairing (assuming nested links improbable in Markdown)
-
-        # Parameters for Hyperlink
-        # Command needs escaping and suffix
-        # e.g. https\://www...;1;5;-1;
+        # Command needs escaping for HWPX format
         command_url = url.replace(':', r'\:').replace('?', r'\?')
         command_str = f"{command_url};1;5;-1;"
 
-        # Escape XML special characters in URLs (& -> &amp;, etc.)
-        escaped_command = saxutils.escape(command_str)
-        escaped_url = saxutils.escape(url)
+        # Create run > ctrl > fieldBegin structure
+        run = self._create_run_elem(char_pr_id=0)
+        ctrl = self._add_elem(run, NS_PARA, 'ctrl')
+        field_begin = self._add_elem(ctrl, NS_PARA, 'fieldBegin', {
+            'id': fid,
+            'type': 'HYPERLINK',
+            'name': '',
+            'editable': '0',
+            'dirty': '1',
+            'zorder': '-1',
+            'fieldid': fid,
+            'metaTag': ''
+        })
 
-        xml = f'''<hp:run charPrIDRef="0"><hp:ctrl>
-        <hp:fieldBegin id="{fid}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="{fid}" metaTag="">
-          <hp:parameters cnt="6" name="">
-            <hp:integerParam name="Prop">0</hp:integerParam>
-            <hp:stringParam name="Command">{escaped_command}</hp:stringParam>
-            <hp:stringParam name="Path">{escaped_url}</hp:stringParam>
-            <hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>
-            <hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_HYPERLINK</hp:stringParam>
-            <hp:stringParam name="DocOpenType">HWPHYPERLINK_JUMP_DONTCARE</hp:stringParam>
-          </hp:parameters>
-        </hp:fieldBegin>
-        </hp:ctrl></hp:run>'''
-        return xml
+        # Add parameters
+        params = self._add_elem(field_begin, NS_PARA, 'parameters', {'cnt': '6', 'name': ''})
+        self._add_elem(params, NS_PARA, 'integerParam', {'name': 'Prop'}, text='0')
+        self._add_elem(params, NS_PARA, 'stringParam', {'name': 'Command'}, text=command_str)
+        self._add_elem(params, NS_PARA, 'stringParam', {'name': 'Path'}, text=url)
+        self._add_elem(params, NS_PARA, 'stringParam', {'name': 'Category'}, text='HWPHYPERLINK_TYPE_URL')
+        self._add_elem(params, NS_PARA, 'stringParam', {'name': 'TargetType'}, text='HWPHYPERLINK_TARGET_HYPERLINK')
+        self._add_elem(params, NS_PARA, 'stringParam', {'name': 'DocOpenType'}, text='HWPHYPERLINK_JUMP_DONTCARE')
+
+        return run
+
+    def _create_field_end_elem(self):
+        """Create field end element (ElementTree version)."""
+        fid = getattr(self, 'last_field_id', '0')
+        run = self._create_run_elem(char_pr_id=0)
+        ctrl = self._add_elem(run, NS_PARA, 'ctrl')
+        self._add_elem(ctrl, NS_PARA, 'fieldEnd', {'beginIDRef': fid, 'fieldid': fid})
+        return run
+
+    def _create_field_begin(self, url):
+        """Create field begin as string (legacy wrapper)."""
+        return self._elem_to_str(self._create_field_begin_elem(url))
 
     def _create_field_end(self):
-        fid = getattr(self, 'last_field_id', '0')
-        return f'<hp:run charPrIDRef="0"><hp:ctrl><hp:fieldEnd beginIDRef="{fid}" fieldid="{fid}"/></hp:ctrl></hp:run>'
+        """Create field end as string (legacy wrapper)."""
+        return self._elem_to_str(self._create_field_end_elem())
 
-    def _create_footnote(self, blocks):
-        # Footnote Control
-        # <hp:footNote number="0" ...> <hp:autoNum .../>  [Blocks] </hp:footNote>
-
-        # We need to process blocks to XML.
-        # But _process_blocks returns <hp:p>...</hp:p>
-        # Footnote contains <hp:subList> <hp:p>...
-
-        # Wait, HWPX footnote content is inside <hp:subList>?
-        # Checking sample3...
-        # Yes: <hp:footNote ...> <hp:subList ...> <hp:p> ... </hp:p> </hp:subList> </hp:footNote>
-        # AND there is <hp:autoNum> inside footNote before subList? Or inside p?
-
-        # Sample:
-        # <hp:footNote ...>
-        #   <hp:autoNum ... />
-        #   <hp:subList ...>
-        #      <hp:p ...> ... </hp:p>
-        #   </hp:subList>
-        # </hp:footNote>
-
-        # Note: Pandoc Blocks -> Body XML.
-        body_xml = self._process_blocks(blocks)
-
-        # Note: numbering usually automatic.
-        # number="0" usually means auto?
-
-        # We need to generate a unique ID for the footnote?
-        # <hp:footNote number="1" instId="2035147584">
+    def _create_footnote_elem(self, blocks):
+        """Create footnote element (ElementTree version)."""
         import random
         inst_id = str(random.randint(1000000, 999999999))
 
-        xml = f'''<hp:run charPrIDRef="0"><hp:ctrl>
-        <hp:footNote number="0" instId="{inst_id}">
-             <hp:autoNum num="0" numType="FOOTNOTE"/>
-             <hp:subList id="{inst_id}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">
-                 {body_xml}
-             </hp:subList>
-        </hp:footNote>
-        </hp:ctrl></hp:run>'''
-        return xml
+        # Create run > ctrl > footNote structure
+        run = self._create_run_elem(char_pr_id=0)
+        ctrl = self._add_elem(run, NS_PARA, 'ctrl')
+        footnote = self._add_elem(ctrl, NS_PARA, 'footNote', {
+            'number': '0',
+            'instId': inst_id
+        })
+
+        # Add autoNum
+        self._add_elem(footnote, NS_PARA, 'autoNum', {
+            'num': '0',
+            'numType': 'FOOTNOTE'
+        })
+
+        # Add subList with content
+        sublist = self._add_elem(footnote, NS_PARA, 'subList', {
+            'id': inst_id,
+            'textDirection': 'HORIZONTAL',
+            'lineWrap': 'BREAK',
+            'vertAlign': 'TOP',
+            'linkListIDRef': '0',
+            'linkListNextIDRef': '0',
+            'textWidth': '0',
+            'textHeight': '0',
+            'hasTextRef': '0',
+            'hasNumRef': '0'
+        })
+
+        # Process blocks and add to sublist
+        # Note: _process_blocks returns string, so we parse it back
+        body_xml = self._process_blocks(blocks)
+        if body_xml.strip():
+            # Wrap in root element for parsing
+            wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{body_xml}</root>'
+            for elem in ET.fromstring(wrapper):
+                sublist.append(elem)
+
+        return run
+
+    def _create_footnote(self, blocks):
+        """Create footnote as string (legacy wrapper)."""
+        return self._elem_to_str(self._create_footnote_elem(blocks))
 
     def _get_char_pr_id(self, base_id, active_formats):
         # 0. If no format updates, return base_id

@@ -224,27 +224,37 @@ class MarkoToPandocAdapter:
         """Convert Marko GFM Table to Pandoc Table format."""
         # Pandoc Table: [attr, caption, specs, head, bodies, foot]
 
-        rows = list(elem.children)
-        if not rows:
+        children = list(elem.children)
+        if not children:
             return None
 
-        # First row is header in GFM (TableHead)
-        head_elem = None
+        # Marko GFM tables can have children as:
+        # 1. TableHead + TableBody (older/some versions)
+        # 2. Direct TableRow elements (current GFM extension)
+        head_rows = []
         body_rows = []
 
-        for child in elem.children:
+        for child in children:
             child_type = type(child).__name__
             if child_type == 'TableHead':
-                head_elem = child
+                # Wrapped in TableHead
+                for row in child.children:
+                    head_rows.append(row)
             elif child_type == 'TableBody':
-                body_rows = list(child.children)
+                # Wrapped in TableBody
+                for row in child.children:
+                    body_rows.append(row)
+            elif child_type == 'TableRow':
+                # Direct TableRow - first row is header, rest are body
+                if not head_rows:
+                    head_rows.append(child)
+                else:
+                    body_rows.append(child)
 
         # Determine column count from header or first body row
         col_count = 0
-        if head_elem and head_elem.children:
-            first_head_row = head_elem.children[0] if head_elem.children else None
-            if first_head_row:
-                col_count = len(first_head_row.children)
+        if head_rows:
+            col_count = len(head_rows[0].children) if head_rows[0].children else 0
         elif body_rows:
             col_count = len(body_rows[0].children) if body_rows[0].children else 0
 
@@ -252,11 +262,8 @@ class MarkoToPandocAdapter:
         specs = [["AlignDefault", {"t": "ColWidthDefault"}] for _ in range(col_count)]
 
         # Convert header
-        head_rows = []
-        if head_elem:
-            for row in head_elem.children:
-                head_rows.append(self._convert_table_row(row))
-        head = [["", [], []], head_rows]
+        head_converted = [self._convert_table_row(row) for row in head_rows]
+        head = [["", [], []], head_converted]
 
         # Convert body
         body_converted = [self._convert_table_row(r) for r in body_rows]
