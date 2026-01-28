@@ -130,9 +130,11 @@ md2hwpx test.md -o debug.json
 
 ## 프로젝트 구조
 
-- `md2hwpx/cli.py`: 메인 실행 스크립트.
-- `md2hwpx/converter.py`: HWPX 변환 핵심 로직 (AST 파싱, XML 생성, Zip 처리).
-- `md2hwpx/blank.hwpx`: HWPX 변환에 필수적인 참조용 템플릿 파일.
+- `md2hwpx/cli.py`: 메인 실행 스크립트
+- `md2hwpx/MarkdownToHwpx.py`: HWPX 변환 핵심 로직 (AST 파싱, XML 생성, Zip 처리)
+- `md2hwpx/marko_adapter.py`: Marko AST를 Pandoc 형식으로 변환하는 어댑터
+- `md2hwpx/frontmatter_parser.py`: YAML 프론트매터 파싱
+- `md2hwpx/blank.hwpx`: HWPX 변환에 필수적인 참조용 템플릿 파일
 
 ## 라이선스 (License)
 

@@ -26,24 +26,30 @@ md2hwpx test.md -o debug.json
 ```
 md2hwpx/
 ├── md2hwpx/                 # Main package
+│   ├── __init__.py          # Package initialization
 │   ├── cli.py               # CLI entry point
-│   ├── converter.py         # Core HWPX conversion (main logic)
+│   ├── MarkdownToHwpx.py    # Core HWPX conversion engine
+│   ├── MarkdownToHtml.py    # HTML conversion (for debugging)
+│   ├── marko_adapter.py     # Marko AST to Pandoc-like format adapter
+│   ├── frontmatter_parser.py # YAML frontmatter parsing
 │   └── blank.hwpx           # Default reference template
 ├── tests/                   # Test files (manual testing)
 │   ├── test.md              # Input sample
-│   └── test-from-*.hwpx     # Expected outputs
-├── docs/                    # Documentation (Korean)
-│   └── CLAUDE_ARCHITECTURE.md  # Detailed architecture for Claude Code
-└── pyproject.toml           # Package configuration
+│   └── *.hwpx               # Output samples
+├── CLAUDE.md                # This file (Claude Code guide)
+├── README.md                # User documentation (Korean)
+├── setup.py                 # Package configuration
+└── pyproject.toml           # Package metadata (if exists)
 ```
 
 ## Key Files to Understand
 
 | File | Purpose |
 |------|---------|
-| `md2hwpx/MarkdownToHwpx.py` | Core HWPX conversion engine |
-| `md2hwpx/marko_adapter.py` | Marko AST to Pandoc-like format adapter |
-| `md2hwpx/cli.py` | CLI argument parsing |
+| `md2hwpx/MarkdownToHwpx.py` | Core HWPX conversion engine (~1500 lines) |
+| `md2hwpx/marko_adapter.py` | Converts Marko AST to Pandoc-like dict format |
+| `md2hwpx/frontmatter_parser.py` | Parses YAML frontmatter metadata |
+| `md2hwpx/cli.py` | CLI argument parsing and orchestration |
 | `md2hwpx/blank.hwpx` | Default template with styles |
 
 ## Dependencies
@@ -56,7 +62,7 @@ md2hwpx/
 ## Architecture Summary
 
 ```
-Markdown File → Marko Parser → AST → Converter → HWPX ZIP
+Markdown File → Marko Parser → AST → Adapter → Converter → HWPX ZIP
                                          ↑
                            Reference HWPX (styles, page setup)
 ```
@@ -64,10 +70,11 @@ Markdown File → Marko Parser → AST → Converter → HWPX ZIP
 ### Conversion Pipeline
 
 1. `marko` parses Markdown into an AST
-2. Reference HWPX (ZIP) provides styles from `header.xml` and page setup from `section0.xml`
-3. AST blocks (paragraphs, headers, tables, lists) mapped to HWPX XML
-4. Images extracted and embedded into HWPX `BinData/` directory
-5. Output ZIP created with all components
+2. `marko_adapter.py` converts Marko AST to Pandoc-like dict format
+3. Reference HWPX (ZIP) provides styles from `header.xml` and page setup from `section0.xml`
+4. AST blocks (paragraphs, headers, tables, lists) mapped to HWPX XML
+5. Images extracted and embedded into HWPX `BinData/` directory
+6. Output ZIP created with all components
 
 ## HWPX Format Basics
 
@@ -91,25 +98,25 @@ HWPX is a ZIP archive containing:
 
 ### Adding New Block Handler
 
-In `converter.py`, handlers follow this pattern:
+In `MarkdownToHwpx.py`, handlers follow this pattern:
 ```python
-def _handle_blocktype(self, block, ...):
-    # 1. Create paragraph element
-    p = ET.SubElement(parent, f'{{{NS_PARA}}}p')
+def _handle_blocktype(self, content):
+    # 1. Create paragraph start
+    xml = self._create_para_start(style_id=..., para_pr_id=...)
 
-    # 2. Add paragraph properties
-    para_pr = ET.SubElement(p, f'{{{NS_PARA}}}paraPr')
+    # 2. Process inline content
+    xml += self._process_inlines(content, base_char_pr_id=...)
 
-    # 3. Process content with _process_inlines()
-    run = ET.SubElement(p, f'{{{NS_PARA}}}run')
-    self._process_inlines(block['c'], run)
+    # 3. Close paragraph
+    xml += '</hp:p>'
+    return xml
 ```
 
 ### Style System
 
 - Styles from reference HWPX are parsed into `self.dynamic_style_map` dict
 - Character properties cached with `_get_char_pr_id()`
-- Numbering definitions created dynamically for lists
+- Placeholder-based styling supported (e.g., `{{H1}}`, `{{BODY}}` in template)
 - Users can customize styles by editing the template HWPX in Hancom Office (WYSIWYG)
 
 ### Extended Header Levels (7-9)
@@ -119,12 +126,31 @@ Standard Markdown only supports header levels 1-6. md2hwpx extends this to suppo
 - Converts them to placeholders before Marko parsing
 - Restores them as Header blocks with levels 7, 8, 9 after parsing
 
+### Marko Adapter
+
+The adapter (`marko_adapter.py`) converts Marko AST to Pandoc-like dict format:
+
+| Marko Element | Pandoc Type |
+|---------------|-------------|
+| `Heading` | `Header` |
+| `Paragraph` | `Para` |
+| `List(ordered=False)` | `BulletList` |
+| `List(ordered=True)` | `OrderedList` |
+| `FencedCode` | `CodeBlock` |
+| `Table` (GFM) | `Table` |
+| `RawText` | `Str` + `Space` |
+| `StrongEmphasis` | `Strong` |
+| `Emphasis` | `Emph` |
+| `Link` | `Link` |
+| `Image` | `Image` |
+| `CodeSpan` | `Code` |
+
 ## Testing
 
 No automated tests. Manual testing workflow:
 ```bash
 cd tests/
-md2hwpx test.md -o test-from-md.hwpx
+md2hwpx test.md -o test-output.hwpx
 # Open in Hancom Office to verify
 ```
 
@@ -132,10 +158,9 @@ md2hwpx test.md -o test-from-md.hwpx
 
 ### Add support for new Marko block type
 
-1. Read `docs/CLAUDE_ARCHITECTURE.md` for detailed handler patterns
-2. Find the block type in Marko AST documentation
-3. Add handler method `_handle_<blocktype>()` in `MarkdownToHwpx.py`
-4. Register in `convert()` method's block processing loop
+1. Add conversion logic in `marko_adapter.py` to convert Marko element to Pandoc-like format
+2. If needed, add handler method `_handle_<blocktype>()` in `MarkdownToHwpx.py`
+3. Register in `_process_blocks()` method's block processing loop
 
 ### Modify style handling
 
@@ -148,6 +173,7 @@ md2hwpx test.md -o test-from-md.hwpx
 1. Copy `blank.hwpx` from the package
 2. Open in Hancom Office and edit styles via Format > Styles (F6)
 3. Save and use with `--reference-doc=custom.hwpx`
+4. Or use placeholder method: add `{{H1}}`, `{{BODY}}` text with desired formatting
 
 ### Debug conversion issues
 
@@ -155,16 +181,10 @@ md2hwpx test.md -o test-from-md.hwpx
 2. Inspect AST structure for problematic content
 3. Add logging in specific handler methods
 
-## Documentation Reference
-
-For detailed information, see:
-- `docs/CLAUDE_ARCHITECTURE.md` - Detailed code architecture and patterns
-- `docs/hwpx_notes.md` - HWPX format technical notes (Korean)
-- `docs/format_comparison.md` - Format comparison (Korean)
-
 ## Known Limitations
 
 - Only Markdown input is supported (no DOCX, HTML, or JSON AST input)
 - Complex formatting (letter-spacing, precise styles) not supported
-- Some table layouts may not convert perfectly
+- Some table layouts may not convert perfectly (no colspan/rowspan in GFM)
+- No underline/superscript/subscript (not part of standard Markdown)
 - Tool focuses on content preservation over exact formatting
