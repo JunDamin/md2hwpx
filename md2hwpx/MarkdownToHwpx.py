@@ -12,11 +12,16 @@ from PIL import Image
 
 
 class MarkdownToHwpx:
-    def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None):
+    def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None):
         self.ast = json_ast
         self.output = []
         self.header_xml_content = header_xml_content
         self.section_xml_content = section_xml_content
+
+        # Store input directory for resolving relative image paths
+        self.input_dir = None
+        if input_path:
+            self.input_dir = os.path.dirname(os.path.abspath(input_path))
 
         # Default Style Mappings (Fallback)
         self.STYLE_MAP = {
@@ -163,7 +168,7 @@ class MarkdownToHwpx:
                     print(f"[Warn] Failed to extract Page Setup: {e}", file=sys.stderr)
 
         # 3. Convert Logic (pass section_xml_content for placeholder detection)
-        converter = MarkdownToHwpx(json_ast, header_xml_content, section_xml_content)
+        converter = MarkdownToHwpx(json_ast, header_xml_content, section_xml_content, input_path)
         xml_body, new_header_xml = converter.convert(page_setup_xml=page_setup_xml)
 
         # 4. Write Output
@@ -1086,17 +1091,13 @@ class MarkdownToHwpx:
         should_read_file = (not w_parsed) or (not h_parsed)
 
         if should_read_file:
-             # Logic to find the file (reuse candidate logic roughly)
-             # Since we don't have 'input_path' here easily unless we passed it.
-             # Wait, we need input_path to find usage relative to it.
-             # We should probably pass input_path to PandocToHwpx __init__ or convert method.
-             # Assuming standard CWD checks for now as fallback.
-
+             # Try to find the image file for dimension detection
              image_found = False
              try:
                  candidates = [target_url]
-                 # Ideally we check input_dir too, but we don't have it in this scope easily without refactoring.
-                 # Let's check if target_url exists provided PWD is correct.
+                 # Add path relative to input file directory
+                 if self.input_dir:
+                     candidates.append(os.path.join(self.input_dir, target_url))
 
                  for cand in candidates:
                      if os.path.exists(cand):
@@ -1230,12 +1231,16 @@ class MarkdownToHwpx:
         command_url = url.replace(':', r'\:').replace('?', r'\?')
         command_str = f"{command_url};1;5;-1;"
 
+        # Escape XML special characters in URLs (& -> &amp;, etc.)
+        escaped_command = saxutils.escape(command_str)
+        escaped_url = saxutils.escape(url)
+
         xml = f'''<hp:run charPrIDRef="0"><hp:ctrl>
         <hp:fieldBegin id="{fid}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="{fid}" metaTag="">
           <hp:parameters cnt="6" name="">
             <hp:integerParam name="Prop">0</hp:integerParam>
-            <hp:stringParam name="Command">{command_str}</hp:stringParam>
-            <hp:stringParam name="Path">{url}</hp:stringParam>
+            <hp:stringParam name="Command">{escaped_command}</hp:stringParam>
+            <hp:stringParam name="Path">{escaped_url}</hp:stringParam>
             <hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>
             <hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_HYPERLINK</hp:stringParam>
             <hp:stringParam name="DocOpenType">HWPHYPERLINK_JUMP_DONTCARE</hp:stringParam>

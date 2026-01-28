@@ -28,75 +28,130 @@ Dynamic: requires-dist
 Dynamic: requires-python
 Dynamic: summary
 
-# pypandoc-hwpx
+# md2hwpx
 
-**pypandoc-hwpx**는 워드(`.docx`), 마크다운(`.md`), HTML(`.html`,`.htm`)을 아래아 한글(`.hwpx`)로 변환해주는 파이썬 도구입니다.
+**md2hwpx**는 마크다운(`.md`)을 아래아 한글(`.hwpx`)로 변환해주는 파이썬 도구입니다. Pandoc 없이 순수 파이썬으로 동작합니다.
 
 ## 주요 기능
 
-- **입력 형식**: [Pandoc](https://pandoc.org)이 지원하는 모든 문서형식 - 워드(`.docx`), 마크다운(`.md`), HTML(`.html`, `.htm`) 등
+- **입력 형식**: 마크다운(`.md`)
 - **출력 형식**: 아래아 한글문서(`.hwpx`)
-- **이미지 처리**: 로컬 이미지를 참조하는 HTML이나 마크다운의 경우 이미지를 포함하여 hwpx 생성
+- **이미지 처리**: 로컬 이미지를 참조하는 마크다운의 경우 이미지를 포함하여 hwpx 생성
 - **고급 레이아웃**:
-    - 워드나 HTML의 셀 병합(rowspan/colspan)이 포함된 복잡한 표를 지원합니다.
     - 참조용 HWPX 파일(`blank.hwpx`)의 스타일과 페이지 설정(여백 등)을 복제하여 사용합니다.
 
 ## 요구 사항
 
 - **Python 3.6+**
-- **Pandoc**: 시스템에 [Pandoc](https://pandoc.org)이 설치되어 있어야 합니다.
-- **Python 라이브러리**: Pandoc의 파이썬 래퍼인 pypandoc 이 필요합니다.
+- **Python 라이브러리**: marko, python-frontmatter, Pillow
 
 ## 설치
 
 ### PyPI 설치 (권장)
 
 ```bash
-pip install pypandoc-hwpx
+pip install md2hwpx
 ```
 
 ### 소스 설치
 
 ```bash
-git clone https://github.com/msjang/pypandoc-hwpx.git
-cd pypandoc-hwpx
+git clone https://github.com/msjang/md2hwpx.git
+cd md2hwpx
 pip install -e .
 ```
 
 ## 사용방법
 
-커맨드 라인 도구(`pypandoc-hwpx`)를 사용하여 변환합니다.
+커맨드 라인 도구(`md2hwpx`)를 사용하여 변환합니다.
 
 ```sh
-# DOCX -> HWPX
-pypandoc-hwpx test.docx --reference-doc=custom.hwpx -o test-from-docx.hwpx
-
-# HTML -> HWPX
-pypandoc-hwpx test.html --reference-doc=custom.hwpx -o test-from-html.hwpx
-
 # MD -> HWPX
-pypandoc-hwpx test.md   --reference-doc=custom.hwpx -o test-from-md.hwpx
+md2hwpx test.md -o output.hwpx
 
-# JSON AST -> HWPX
-pypandoc-hwpx test.json --reference-doc=custom.hwpx -o test-from-json.hwpx
+# 참조 문서 지정
+md2hwpx test.md --reference-doc=custom.hwpx -o output.hwpx
 ```
 
 * `--reference-doc`: (선택) 스타일(글자 모양, 문단 모양, 용지 설정 등)을 가져올 기준 HWPX 파일. 지정하지 않으면 패키지에 내장된 기본 파일(`blank.hwpx`)을 사용합니다.
 
+## 스타일 커스터마이징 (Template Customization)
+
+한컴오피스에서 템플릿 HWPX 파일을 편집하여 출력 스타일을 커스터마이징할 수 있습니다. **플레이스홀더 방식**을 권장합니다.
+
+### 방법 1: 플레이스홀더 방식 (권장)
+
+한컴오피스에서 플레이스홀더 텍스트를 작성하고 원하는 서식을 적용하면, 변환 시 해당 서식이 그대로 적용됩니다.
+
+#### 1. 템플릿 만들기
+
+1. 한컴오피스에서 새 문서를 만듭니다
+2. 다음 플레이스홀더를 입력하고 각각 원하는 서식을 적용합니다:
+
+| 플레이스홀더 | 마크다운 요소 | 예시 서식 |
+|-------------|--------------|----------|
+| `{{H1}}` | `# 제목1` | 24pt, 파란색, 굵게 |
+| `{{H2}}` | `## 제목2` | 18pt, 검정색, 굵게 |
+| `{{H3}}` | `### 제목3` | 14pt, 검정색, 굵게 |
+| `{{H4}}` ~ `{{H9}}` | `####` ~ `#########` | 원하는 서식 |
+| `{{BODY}}` | 본문 텍스트 | 11pt, 검정색 |
+
+3. 파일을 `my_template.hwpx`로 저장합니다
+
+#### 2. 변환하기
+
+```bash
+md2hwpx input.md --reference-doc=my_template.hwpx -o output.hwpx
+```
+
+변환된 문서에서:
+- `# 제목` → `{{H1}}`에 적용한 서식 (24pt, 파란색, 굵게)
+- 본문 → `{{BODY}}`에 적용한 서식 (11pt, 검정색)
+
+### 방법 2: 스타일 편집 방식
+
+기본 템플릿의 스타일을 직접 편집하는 방식입니다.
+
+#### 1. 기본 템플릿 복사
+
+```bash
+python -c "import md2hwpx; import shutil; shutil.copy(md2hwpx.__path__[0] + '/blank.hwpx', 'my_template.hwpx')"
+```
+
+#### 2. 한컴오피스에서 스타일 편집
+
+1. `my_template.hwpx`를 한컴오피스에서 엽니다
+2. **서식 > 스타일** 메뉴 (또는 `F6`)를 선택합니다
+3. 원하는 스타일을 수정합니다:
+
+| 스타일 이름 | 마크다운 요소 |
+|------------|--------------|
+| 바탕글 | 본문 텍스트 |
+| 제목 1 ~ 제목 9 | `#` ~ `#########` |
+
+#### 3. 커스텀 템플릿으로 변환
+
+```bash
+md2hwpx input.md --reference-doc=my_template.hwpx -o output.hwpx
+```
+
+### 커스터마이징 가능한 항목
+
+- 글꼴 및 크기
+- 글자 색상 및 배경색
+- 문단 간격 (위/아래 여백, 줄 간격)
+- 들여쓰기 및 정렬
+- 페이지 여백 및 용지 크기
+
 ## 설명 및 제약사항
 
-[Pandoc](https://pandoc.org)은 문서를 내부적으로 [JSON AST(Abstract Syntax Tree)](https://pandoc.org/using-the-pandoc-api.html) 형식으로 변환한 뒤, 이를 대상 포맷으로 다시 변환하는 방식을 사용합니다. 여러 문서 형식을 아우르기 위해, AST는 공통적으로 지원 가능한 최소한의 서식 정보만을 포함합니다.
+**md2hwpx**는 [Marko](https://github.com/frostming/marko) 라이브러리를 사용하여 마크다운을 AST(Abstract Syntax Tree)로 파싱한 뒤, 이를 아래아 한글(`.hwpx`) 규격에 맞춰 생성합니다. Pandoc 없이 순수 파이썬으로 동작합니다.
 
-**pypandoc-hwpx**는 이 과정을 활용하여 워드(`.docx`), 마크다운(`.md`), HTML(`.html`,`.htm`) 등의 문서를 AST로 변환하고, 이를 다시 아래아 한글(`.hwpx`) 규격에 맞춰 생성합니다. 따라서 AST가 표현하지 못하는 복잡한 서식(장평, 자간, 정교한 스타일 등)은 변환 과정에서 제외될 수 있습니다.
-
-디버깅 및 개발 편의를 위해 중간 단계인 JSON AST 변환과 HTML 변환 기능도 제공합니다.
+디버깅 및 개발 편의를 위해 중간 단계인 JSON AST 출력 기능을 제공합니다.
 
 ```sh
 # 디버깅용 JSON 출력
-pypandoc-hwpx test.docx -o test-from-docx.json
-
-# 확인용 HTML 출력
-pypandoc-hwpx test.docx -o test-from-docx.html
+md2hwpx test.md -o debug.json
 ```
 
 ## 예제 (Examples)
@@ -105,11 +160,11 @@ pypandoc-hwpx test.docx -o test-from-docx.html
 
 ## 프로젝트 구조
 
-- `pypandoc_hwpx/cli.py`: 메인 실행 스크립트.
-- `pypandoc_hwpx/PandocToHwpx.py`: HWPX 변환 핵심 로직 (AST 파싱, XML 생성, Zip 처리).
-- `pypandoc_hwpx/PandocToHtml.py`: HTML 변환 핵심 로직 (이미지 추출, HTML 템플릿).
-- `pypandoc_hwpx/blank.hwpx`: HWPX 변환에 필수적인 참조용 템플릿 파일.
-    - *참고: Mac용 Word 16.73에서 생성한 DOCX를 Mac용 한글 12.30.0에서 HWPX로 변환한 뒤, XML을 수동 최적화하여 제작했습니다.*
+- `md2hwpx/cli.py`: 메인 실행 스크립트
+- `md2hwpx/MarkdownToHwpx.py`: HWPX 변환 핵심 로직 (AST 파싱, XML 생성, Zip 처리)
+- `md2hwpx/marko_adapter.py`: Marko AST를 Pandoc 형식으로 변환하는 어댑터
+- `md2hwpx/frontmatter_parser.py`: YAML 프론트매터 파싱
+- `md2hwpx/blank.hwpx`: HWPX 변환에 필수적인 참조용 템플릿 파일
 
 ## 라이선스 (License)
 
