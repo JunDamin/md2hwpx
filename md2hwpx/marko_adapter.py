@@ -17,9 +17,10 @@ class MarkoToPandocAdapter:
     EXTENDED_HEADER_RE = re.compile(r'^(#{7,9})\s+(.+)$')
 
     def __init__(self):
-        # Initialize Marko with GFM (tables, strikethrough, etc.)
-        self.md = Markdown(extensions=[GFM])
-        self.footnote_defs = {}  # Store footnote definitions
+        # Initialize Marko with GFM (tables, strikethrough, etc.) and Footnote support
+        # Extensions are loaded by name string
+        self.md = Markdown(extensions=['gfm', 'footnote'])
+        self.footnotes = {}  # Store footnote definitions from document
         self.extended_headers = {}  # Store extended header placeholders
 
     def _preprocess_extended_headers(self, markdown_text: str) -> str:
@@ -77,13 +78,18 @@ class MarkoToPandocAdapter:
         Returns:
             {"pandoc-api-version": [...], "meta": {...}, "blocks": [...]}
         """
-        # Reset extended headers for each parse
+        # Reset state for each parse
         self.extended_headers = {}
+        self.footnotes = {}
 
         # Preprocess to handle extended headers (7-9)
         processed_text = self._preprocess_extended_headers(markdown_text)
 
         doc = self.md.parse(processed_text)
+
+        # Store footnotes from document (if footnote extension is active)
+        if hasattr(doc, 'footnotes'):
+            self.footnotes = doc.footnotes
 
         blocks = []
         for child in doc.children:
@@ -152,6 +158,8 @@ class MarkoToPandocAdapter:
             return None  # Skip link reference definitions (handled during parsing)
         elif elem_type == 'SetextHeading':
             return self._convert_heading(element)
+        elif elem_type == 'FootnoteDef':
+            return None  # Skip - footnote content is handled via FootnoteRef
 
         # Unknown block type - skip with warning
         # print(f"[Warn] Unknown block type: {elem_type}")
@@ -370,6 +378,9 @@ class MarkoToPandocAdapter:
         elif elem_type == 'Literal':
             text = getattr(elem, 'children', '')
             return self._convert_raw_text(text)
+        elif elem_type == 'FootnoteRef':
+            # Convert footnote reference to Pandoc Note
+            return self._convert_footnote_ref(elem)
 
         # Handle string children (e.g., from RawText)
         if isinstance(elem, str):
@@ -400,3 +411,26 @@ class MarkoToPandocAdapter:
                 result.append({"t": "Space"})
 
         return result
+
+    def _convert_footnote_ref(self, elem) -> dict:
+        """Convert FootnoteRef to Pandoc Note format."""
+        # Get footnote label from the element (stored as 'label' attribute)
+        label = getattr(elem, 'label', None)
+        if not label:
+            return None
+
+        # Look up the footnote definition (keys are lowercase)
+        footnote_def = self.footnotes.get(label.lower())
+        if not footnote_def:
+            # Footnote not found - return the reference as plain text
+            return {"t": "Str", "c": f"[^{label}]"}
+
+        # Convert footnote content to blocks
+        blocks = []
+        for child in footnote_def.children:
+            block = self._convert_block(child)
+            if block:
+                blocks.append(block)
+
+        # Pandoc Note format: {"t": "Note", "c": [blocks]}
+        return {"t": "Note", "c": blocks}
