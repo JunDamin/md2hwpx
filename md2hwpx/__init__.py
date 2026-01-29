@@ -13,6 +13,8 @@ from .frontmatter_parser import (
     parse_markdown_string_with_frontmatter,
     convert_metadata_to_pandoc_meta,
 )
+from .config import ConversionConfig, DEFAULT_CONFIG
+from .exceptions import HwpxError, TemplateError, ImageError, StyleError, ConversionError
 
 __version__ = "0.2.0"
 __all__ = [
@@ -22,4 +24,11 @@ __all__ = [
     "parse_markdown_with_frontmatter",
     "parse_markdown_string_with_frontmatter",
     "convert_metadata_to_pandoc_meta",
+    "ConversionConfig",
+    "DEFAULT_CONFIG",
+    "HwpxError",
+    "TemplateError",
+    "ImageError",
+    "StyleError",
+    "ConversionError",
 ]

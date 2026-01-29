@@ -228,6 +228,12 @@ class MarkoToPandocAdapter:
             "c": [["", [], []], code]
         }
 
+    _ALIGN_MAP = {
+        'left': 'AlignLeft',
+        'center': 'AlignCenter',
+        'right': 'AlignRight',
+    }
+
     def _convert_table(self, elem) -> dict:
         """Convert Marko GFM Table to Pandoc Table format."""
         # Pandoc Table: [attr, caption, specs, head, bodies, foot]
@@ -261,13 +267,19 @@ class MarkoToPandocAdapter:
 
         # Determine column count from header or first body row
         col_count = 0
-        if head_rows:
-            col_count = len(head_rows[0].children) if head_rows[0].children else 0
-        elif body_rows:
-            col_count = len(body_rows[0].children) if body_rows[0].children else 0
+        first_row = head_rows[0] if head_rows else (body_rows[0] if body_rows else None)
+        if first_row and first_row.children:
+            col_count = len(first_row.children)
 
-        # Column specs (alignment)
-        specs = [["AlignDefault", {"t": "ColWidthDefault"}] for _ in range(col_count)]
+        # Column specs (alignment) - extract from first row cells
+        specs = []
+        if first_row and first_row.children:
+            for cell in first_row.children:
+                cell_align = getattr(cell, 'align', None)
+                align_str = self._ALIGN_MAP.get(cell_align, 'AlignDefault')
+                specs.append([align_str, {"t": "ColWidthDefault"}])
+        else:
+            specs = [["AlignDefault", {"t": "ColWidthDefault"}] for _ in range(col_count)]
 
         # Convert header
         head_converted = [self._convert_table_row(row) for row in head_rows]
@@ -300,9 +312,11 @@ class MarkoToPandocAdapter:
             # Pandoc cell: [attr, align, rowspan, colspan, [blocks]]
             content = self._convert_children_to_inlines(cell.children)
             para = {"t": "Plain", "c": content}
+            cell_align = getattr(cell, 'align', None)
+            align_str = self._ALIGN_MAP.get(cell_align, 'AlignDefault')
             cells.append([
                 ["", [], []],   # attr
-                "AlignDefault", # align
+                align_str,      # align
                 1,              # rowspan (GFM doesn't support)
                 1,              # colspan (GFM doesn't support)
                 [para]          # blocks

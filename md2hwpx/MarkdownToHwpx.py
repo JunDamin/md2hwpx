@@ -6,9 +6,15 @@ import io
 import shutil
 import zipfile
 import json
+import logging
 import xml.sax.saxutils as saxutils
 import xml.etree.ElementTree as ET
 from PIL import Image
+
+from .config import ConversionConfig, DEFAULT_CONFIG
+from .exceptions import TemplateError, ImageError, StyleError, ConversionError, SecurityError
+
+logger = logging.getLogger('md2hwpx')
 
 # XML Namespaces for HWPX format
 NS_HEAD = 'http://www.hancom.co.kr/hwpml/2011/head'
@@ -18,11 +24,14 @@ NS_SEC = 'http://www.hancom.co.kr/hwpml/2011/section'
 
 
 class MarkdownToHwpx:
-    def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None):
+    def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None, config=None):
         self.ast = json_ast
         self.output = []
         self.header_xml_content = header_xml_content
         self.section_xml_content = section_xml_content
+
+        # Configuration (use default if not provided)
+        self.config = config if config is not None else DEFAULT_CONFIG
 
         # Store input directory for resolving relative image paths
         self.input_dir = None
@@ -47,6 +56,12 @@ class MarkdownToHwpx:
 
         # Placeholder-based styles from template (e.g., {{H1}}, {{BODY}})
         self.placeholder_styles = {}
+
+        # Table cell placeholder styles (12 cell types)
+        self.cell_styles = {}
+
+        # List placeholder styles (bullet/ordered × levels 1-7)
+        self.list_styles = {}
 
         # XML Tree and CharPr Cache
         self.header_tree = None
@@ -115,7 +130,7 @@ class MarkdownToHwpx:
         return "".join(text)
 
     @staticmethod
-    def convert_to_hwpx(input_path, output_path, reference_path, json_ast=None):
+    def convert_to_hwpx(input_path, output_path, reference_path, json_ast=None, config=None):
         """
         Convert Markdown to HWPX.
 
@@ -124,13 +139,36 @@ class MarkdownToHwpx:
             output_path: Output HWPX file path
             reference_path: Reference HWPX for styles
             json_ast: Pre-parsed Pandoc-like AST dict (from MarkoToPandocAdapter)
+            config: Optional ConversionConfig instance
         """
+        if config is None:
+            config = DEFAULT_CONFIG
+
         if not os.path.exists(reference_path):
-             raise FileNotFoundError(f"Reference file not found: {reference_path}")
+             raise TemplateError(f"Reference template not found: {reference_path}")
 
         # AST is now passed in, not generated via pypandoc
         if json_ast is None:
-            raise ValueError("json_ast parameter is required")
+            raise ConversionError("json_ast parameter is required")
+
+        # Validate file sizes
+        input_size = os.path.getsize(input_path)
+        if input_size > config.MAX_INPUT_FILE_SIZE:
+            raise SecurityError(
+                f"Input file too large: {input_size} bytes "
+                f"(max {config.MAX_INPUT_FILE_SIZE} bytes)"
+            )
+
+        ref_size = os.path.getsize(reference_path)
+        if ref_size > config.MAX_TEMPLATE_FILE_SIZE:
+            raise SecurityError(
+                f"Template file too large: {ref_size} bytes "
+                f"(max {config.MAX_TEMPLATE_FILE_SIZE} bytes)"
+            )
+
+        # Validate reference file is a valid ZIP
+        if not zipfile.is_zipfile(reference_path):
+            raise TemplateError(f"Reference template is not a valid HWPX (ZIP) file: {reference_path}")
 
         # 2. Read Reference (Header & Section0)
         header_xml_content = ""
@@ -140,9 +178,20 @@ class MarkdownToHwpx:
         with open(reference_path, 'rb') as f:
             ref_doc_bytes = f.read()
 
-        with zipfile.ZipFile(io.BytesIO(ref_doc_bytes)) as z:
-            if "Contents/header.xml" in z.namelist():
-                header_xml_content = z.read("Contents/header.xml").decode('utf-8')
+        try:
+            ref_zip = zipfile.ZipFile(io.BytesIO(ref_doc_bytes))
+        except zipfile.BadZipFile:
+            raise TemplateError(f"Corrupted HWPX template file: {reference_path}")
+
+        with ref_zip as z:
+            required_files = ["Contents/header.xml", "Contents/section0.xml"]
+            missing = [f for f in required_files if f not in z.namelist()]
+            if missing:
+                raise TemplateError(
+                    f"Invalid HWPX template: missing required files {missing} in {reference_path}"
+                )
+
+            header_xml_content = z.read("Contents/header.xml").decode('utf-8')
 
             # Read section0.xml for placeholder detection and page setup
             if "Contents/section0.xml" in z.namelist():
@@ -171,7 +220,7 @@ class MarkdownToHwpx:
                              if extracted_nodes:
                                  page_setup_xml = "".join(extracted_nodes)
                 except Exception as e:
-                    print(f"[Warn] Failed to extract Page Setup: {e}", file=sys.stderr)
+                    logger.warning("Failed to extract Page Setup: %s", e)
 
         # 3. Convert Logic (pass section_xml_content for placeholder detection)
         converter = MarkdownToHwpx(json_ast, header_xml_content, section_xml_content, input_path)
@@ -235,11 +284,14 @@ class MarkdownToHwpx:
                                     image_data = input_zip.read(cand)
                                     out_zip.writestr(bindata_name, image_data)
                                     embedded = True
-                                    # print(f"[Debug] Extracted info HWPX: {cand} -> {bindata_name}")
+                                    # logger.debug("Extracted into HWPX: %s -> %s", cand, bindata_name)
                                     break
 
                         if not embedded:
-                             print(f"[Warn] Image not found: {img_path}", file=sys.stderr)
+                             searched = candidates_to_check
+                             if input_zip is not None:
+                                 searched += zip_candidates
+                             logger.warning("Image not found: %s. Searched: %s", img_path, searched)
 
 
                     # Copy/Modify Files
@@ -301,14 +353,46 @@ class MarkdownToHwpx:
                         else:
                             out_zip.writestr(item, ref_zip.read(fname))
         except Exception as e:
-             import traceback
-             traceback.print_exc()
-             print(f"[Error] HWPX creation failed: {e}", file=sys.stderr)
+             logger.error("HWPX creation failed: %s", e, exc_info=True)
         finally:
              if input_zip:
                  input_zip.close()
 
-        print(f"Successfully created {output_path}")
+        logger.info("Successfully created %s", output_path)
+
+    @staticmethod
+    def _validate_image_path(image_path, base_dir=None):
+        """Validate that an image path does not traverse outside allowed directories.
+
+        Args:
+            image_path: The image path from the markdown document
+            base_dir: The base directory to validate against (input file's directory)
+
+        Raises:
+            SecurityError: If the path attempts directory traversal
+        """
+        # Reject absolute paths on any OS
+        if os.path.isabs(image_path):
+            raise SecurityError(
+                f"Absolute image paths are not allowed: {image_path}"
+            )
+
+        # Normalize and check for directory traversal components
+        normalized = os.path.normpath(image_path)
+        parts = normalized.replace('\\', '/').split('/')
+        if '..' in parts:
+            raise SecurityError(
+                f"Directory traversal in image path is not allowed: {image_path}"
+            )
+
+        # If we have a base directory, verify resolved path stays within it
+        if base_dir:
+            resolved = os.path.normpath(os.path.join(base_dir, image_path))
+            base_resolved = os.path.normpath(base_dir)
+            if not resolved.startswith(base_resolved + os.sep) and resolved != base_resolved:
+                raise SecurityError(
+                    f"Image path resolves outside input directory: {image_path}"
+                )
 
     TABLE_BORDER_FILL_XML = """
     <hh:borderFill id="{id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
@@ -380,9 +464,9 @@ class MarkdownToHwpx:
             if normal_style_node is not None:
                 self.normal_style_id = normal_style_node.get('id')
                 self.normal_para_pr_id = normal_style_node.get('paraPrIDRef')
-                print(f"[Debug] Normal Style Detected: StyleID={self.normal_style_id}, ParaPrID={self.normal_para_pr_id}")
+                logger.debug("Normal Style Detected: StyleID=%s, ParaPrID=%s", self.normal_style_id, self.normal_para_pr_id)
             else:
-                print(f"[Debug] No Normal Style found, using defaults.")
+                logger.debug("No Normal Style found, using defaults.")
 
             # --- 2. Map Outline Levels ---
             level_to_para_pr = {}
@@ -444,7 +528,7 @@ class MarkdownToHwpx:
                      if detected_levels[i] != i:
                          raise ValueError(f"Outline levels are missing/gapped. Expected {i}, found {detected_levels[i]}")
 
-            print(f"[Debug] Validated Outline Levels: {detected_levels}")
+            logger.debug("Validated Outline Levels: %s", detected_levels)
 
             # --- 4. Validation: Check Normal Style Cleanliness ---
             normal_char_pr_id = 0
@@ -466,46 +550,84 @@ class MarkdownToHwpx:
                      raise ValueError(f"Normal Style (charPrID={normal_char_pr_id}) must be clean. Found forbidden properties: {found_dirty}")
 
         except Exception as e:
-            print(f"[Error] Failed to parse/validate header.xml: {e}", file=sys.stderr)
+            logger.error("Failed to parse/validate header.xml: %s", e)
             raise e
 
     def _load_placeholder_styles(self):
         """
         Load placeholder-based styles from template section0.xml.
 
-        Finds text like {{H1}}, {{BODY}}, etc. and extracts their
-        charPrIDRef and paraPrIDRef for use during conversion.
+        Finds text like {{H1}}, {{BODY}}, {{CELL_HEADER_LEFT}}, {{LIST_BULLET_1}}, etc.
+        and extracts their styling attributes for use during conversion.
         """
         if not self.section_xml_content:
             return
 
         try:
             section_root = ET.fromstring(self.section_xml_content)
-            placeholders = self._find_placeholders(section_root)
+            placeholders, cell_styles, list_styles = self._find_placeholders(section_root)
 
+            # Store text style placeholders
             for name, info in placeholders.items():
                 self.placeholder_styles[name] = {
                     'charPrIDRef': info['charPrIDRef'],
                     'paraPrIDRef': info['paraPrIDRef'],
                 }
-                print(f"[Debug] Found placeholder {{{{{name}}}}}: charPr={info['charPrIDRef']}, paraPr={info['paraPrIDRef']}")
+                logger.debug("Found placeholder {{%s}}: charPr=%s, paraPr=%s", name, info['charPrIDRef'], info['paraPrIDRef'])
+
+            # Store cell style placeholders
+            for cell_key, info in cell_styles.items():
+                self.cell_styles[cell_key] = info
+                logger.debug("Found cell placeholder {{CELL_%s}}: borderFill=%s, charPr=%s, paraPr=%s", cell_key, info.get('borderFillIDRef'), info.get('charPrIDRef'), info.get('paraPrIDRef'))
+
+            # Store list style placeholders
+            for list_key, info in list_styles.items():
+                self.list_styles[list_key] = info
+                list_type, level = list_key
+                logger.debug("Found list placeholder {{LIST_%s_%s}}: charPr=%s, paraPr=%s", list_type, level, info.get('charPrIDRef'), info.get('paraPrIDRef'))
 
             if self.placeholder_styles:
-                print(f"[Debug] Loaded {len(self.placeholder_styles)} placeholder styles from template")
+                logger.debug("Loaded %d text placeholder styles from template", len(self.placeholder_styles))
+            if self.cell_styles:
+                logger.debug("Loaded %d cell placeholder styles from template", len(self.cell_styles))
+            if self.list_styles:
+                logger.debug("Loaded %d list placeholder styles from template", len(self.list_styles))
         except Exception as e:
-            print(f"[Warn] Failed to load placeholder styles: {e}", file=sys.stderr)
+            logger.warning("Failed to load placeholder styles: %s", e)
 
     def _find_placeholders(self, section_root):
         """
         Find {{PLACEHOLDER}} text in section0.xml.
 
         Returns:
-            dict[name] -> {charPrIDRef, paraPrIDRef}
+            tuple of (text_placeholders, cell_styles, list_styles)
+            - text_placeholders: dict[name] -> {charPrIDRef, paraPrIDRef}
+            - cell_styles: dict[cell_key] -> {borderFillIDRef, charPrIDRef, paraPrIDRef, cellMargin, borderFill}
+            - list_styles: dict[(list_type, level)] -> {charPrIDRef, paraPrIDRef}
         """
         placeholders = {}
-        placeholder_pattern = re.compile(r'\{\{(\w+)\}\}')
+        cell_styles = {}
+        list_styles = {}
 
-        # Find all paragraphs
+        placeholder_pattern = re.compile(r'\{\{(\w+)\}\}')
+        cell_pattern = re.compile(r'\{\{CELL_(\w+)\}\}')
+        list_pattern = re.compile(r'\{\{LIST_(BULLET|ORDERED)_(\d+)\}\}')
+
+        # Find cell placeholders in tables
+        for tbl in section_root.findall('.//hp:tbl', self.namespaces):
+            for tc in tbl.findall('.//hp:tc', self.namespaces):
+                # Find placeholder text in cell
+                for sublist in tc.findall('.//hp:subList', self.namespaces):
+                    for para in sublist.findall('.//hp:p', self.namespaces):
+                        for run in para.findall('hp:run', self.namespaces):
+                            for text_elem in run.findall('hp:t', self.namespaces):
+                                if text_elem.text:
+                                    cell_match = cell_pattern.search(text_elem.text)
+                                    if cell_match:
+                                        cell_key = cell_match.group(1).upper()  # e.g., HEADER_LEFT
+                                        cell_styles[cell_key] = self._extract_cell_attributes(tc, para, run)
+
+        # Find text and list placeholders in paragraphs (outside tables)
         for para in section_root.findall('.//hp:p', self.namespaces):
             para_pr_id = para.get('paraPrIDRef', '0')
 
@@ -516,6 +638,22 @@ class MarkdownToHwpx:
                 # Find text elements
                 for text_elem in run.findall('hp:t', self.namespaces):
                     if text_elem.text:
+                        # Check for list placeholder
+                        list_match = list_pattern.search(text_elem.text)
+                        if list_match:
+                            list_type = list_match.group(1).upper()  # BULLET or ORDERED
+                            level = int(list_match.group(2))
+                            list_styles[(list_type, level)] = {
+                                'charPrIDRef': char_pr_id,
+                                'paraPrIDRef': para_pr_id,
+                            }
+                            continue
+
+                        # Check for cell placeholder (skip - handled above in table loop)
+                        if text_elem.text.startswith('{{CELL_'):
+                            continue
+
+                        # Check for general placeholder
                         match = placeholder_pattern.search(text_elem.text)
                         if match:
                             placeholder_name = match.group(1).upper()
@@ -524,7 +662,103 @@ class MarkdownToHwpx:
                                 'paraPrIDRef': para_pr_id,
                             }
 
-        return placeholders
+        return placeholders, cell_styles, list_styles
+
+    def _extract_cell_attributes(self, tc, para, run):
+        """Extract styling attributes from a table cell.
+
+        Args:
+            tc: The <hp:tc> table cell element
+            para: The <hp:p> paragraph element inside the cell
+            run: The <hp:run> run element containing the placeholder
+
+        Returns:
+            dict with borderFillIDRef, paraPrIDRef, charPrIDRef, cellMargin, borderFill
+        """
+        attrs = {
+            # From <hp:tc>
+            'borderFillIDRef': tc.get('borderFillIDRef'),
+
+            # From <hp:p>
+            'paraPrIDRef': para.get('paraPrIDRef', '0'),
+            'styleIDRef': para.get('styleIDRef', '0'),
+
+            # From <hp:run>
+            'charPrIDRef': run.get('charPrIDRef', '0'),
+
+            # From <hp:cellMargin> if present
+            'cellMargin': self._extract_cell_margin(tc),
+        }
+
+        # Also resolve borderFill details from header.xml
+        if attrs['borderFillIDRef'] and self.header_root is not None:
+            attrs['borderFill'] = self._resolve_border_fill(attrs['borderFillIDRef'])
+
+        return attrs
+
+    def _extract_cell_margin(self, tc):
+        """Extract cell margin values from <hp:cellMargin> element."""
+        default_margin = self.config.CELL_MARGIN_DEFAULT
+        cell_margin = tc.find('.//hp:cellMargin', self.namespaces)
+        if cell_margin is not None:
+            return {
+                'left': cell_margin.get('left', str(default_margin['left'])),
+                'right': cell_margin.get('right', str(default_margin['right'])),
+                'top': cell_margin.get('top', str(default_margin['top'])),
+                'bottom': cell_margin.get('bottom', str(default_margin['bottom'])),
+            }
+        return {
+            'left': str(default_margin['left']),
+            'right': str(default_margin['right']),
+            'top': str(default_margin['top']),
+            'bottom': str(default_margin['bottom'])
+        }
+
+    def _resolve_border_fill(self, border_fill_id):
+        """Look up borderFill element in header.xml and extract properties.
+
+        Args:
+            border_fill_id: The ID of the borderFill element to look up
+
+        Returns:
+            dict with border properties (leftBorder, rightBorder, topBorder, bottomBorder, fillColor)
+            or None if not found
+        """
+        if self.header_root is None:
+            return None
+
+        bf_elem = self.header_root.find(
+            f'.//hh:borderFill[@id="{border_fill_id}"]',
+            self.namespaces
+        )
+        if bf_elem is None:
+            return None
+
+        return {
+            'leftBorder': self._extract_border(bf_elem, 'leftBorder'),
+            'rightBorder': self._extract_border(bf_elem, 'rightBorder'),
+            'topBorder': self._extract_border(bf_elem, 'topBorder'),
+            'bottomBorder': self._extract_border(bf_elem, 'bottomBorder'),
+            'fillColor': self._extract_fill_color(bf_elem),
+        }
+
+    def _extract_border(self, bf_elem, border_name):
+        """Extract border properties (type, width, color) from borderFill element."""
+        border = bf_elem.find(f'hh:{border_name}', self.namespaces)
+        if border is None:
+            return {'type': 'NONE', 'width': '0.12 mm', 'color': '#000000'}
+        return {
+            'type': border.get('type', 'NONE'),
+            'width': border.get('width', '0.12 mm'),
+            'color': border.get('color', '#000000'),
+        }
+
+    def _extract_fill_color(self, bf_elem):
+        """Extract background fill color from borderFill element."""
+        win_brush = bf_elem.find('.//hc:winBrush', self.namespaces)
+        if win_brush is not None:
+            return win_brush.get('faceColor', 'none')
+        return 'none'
 
     def convert(self, page_setup_xml=None):
         blocks = self.ast.get('blocks', [])
@@ -541,9 +775,9 @@ class MarkdownToHwpx:
                 # Insert AFTER the opening tag, so it becomes the first child
                 insert_pos = match.end()
                 xml_body = xml_body[:insert_pos] + page_setup_xml + xml_body[insert_pos:]
-                print("[Debug] Injected Page Setup into first hp:run.")
+                logger.debug("Injected Page Setup into first hp:run.")
             else:
-                print("[Warn] No hp:run found to inject Page Setup.", file=sys.stderr)
+                logger.warning("No hp:run found to inject Page Setup.")
 
         # Serialize the modified header.xml
         for prefix, uri in self.namespaces.items():
@@ -582,12 +816,12 @@ class MarkdownToHwpx:
     def _process_blocks(self, blocks):
         result = []
         if not isinstance(blocks, list):
-             print(f"[Error] _process_blocks expected list, got {type(blocks)}: {blocks}", file=sys.stderr)
+             logger.error("_process_blocks expected list, got %s: %s", type(blocks), blocks)
              return ""
 
         for block in blocks:
             if not isinstance(block, dict):
-                print(f"[Error] Skipped invalid block: {block}", file=sys.stderr)
+                logger.error("Skipped invalid block: %s", block)
                 continue
 
             b_type = block.get('t')
@@ -607,8 +841,12 @@ class MarkdownToHwpx:
                 result.append(self._handle_code_block(b_content))
             elif b_type == 'Table':
                 result.append(self._handle_table(b_content))
+            elif b_type == 'BlockQuote':
+                result.append(self._handle_blockquote(b_content))
+            elif b_type == 'HorizontalRule':
+                result.append(self._handle_horizontal_rule())
             else:
-                # print(f"[Warn] Unhandled Block Type: {b_type}", file=sys.stderr)
+                # logger.warning("Unhandled Block Type: %s", b_type)
                 pass
 
         return "\n".join(result)
@@ -785,6 +1023,311 @@ class MarkdownToHwpx:
         para.append(run)
         return self._elem_to_str(para)
 
+    _PANDOC_ALIGN_MAP = {
+        'AlignLeft': 'LEFT',
+        'AlignCenter': 'CENTER',
+        'AlignRight': 'RIGHT',
+        'AlignDefault': None,
+    }
+
+    def _pandoc_align_to_hwpx(self, pandoc_align):
+        """Convert Pandoc alignment string to HWPX alignment value.
+
+        Args:
+            pandoc_align: e.g., 'AlignLeft', 'AlignCenter', 'AlignRight', 'AlignDefault'
+
+        Returns:
+            HWPX alignment string ('LEFT', 'CENTER', 'RIGHT') or None for default
+        """
+        return self._PANDOC_ALIGN_MAP.get(pandoc_align)
+
+    def _get_aligned_para_pr(self, hwpx_align):
+        """Create or retrieve a paraPr with specific horizontal alignment.
+
+        Args:
+            hwpx_align: 'LEFT', 'CENTER', or 'RIGHT'
+
+        Returns:
+            paraPr ID string, or None if alignment cannot be applied
+        """
+        if not hwpx_align:
+            return None
+
+        # Cache key for aligned paraPr
+        cache_attr = '_aligned_para_pr_cache'
+        if not hasattr(self, cache_attr):
+            self._aligned_para_pr_cache = {}
+
+        if hwpx_align in self._aligned_para_pr_cache:
+            return self._aligned_para_pr_cache[hwpx_align]
+
+        base_id = self.normal_para_pr_id
+        base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
+        if base_node is None:
+            return None
+
+        new_node = copy.deepcopy(base_node)
+        self.max_para_pr_id += 1
+        new_id = str(self.max_para_pr_id)
+        new_node.set('id', new_id)
+
+        # Set horizontal alignment
+        align_elem = new_node.find('hh:align', self.namespaces)
+        if align_elem is None:
+            align_elem = ET.SubElement(new_node, f'{{{NS_HEAD}}}align')
+        align_elem.set('horizontal', hwpx_align)
+
+        para_props = self.header_root.find('.//hh:paraProperties', self.namespaces)
+        if para_props is not None:
+            para_props.append(new_node)
+
+        self._aligned_para_pr_cache[hwpx_align] = new_id
+        return new_id
+
+    def _get_blockquote_para_pr(self, level=0):
+        """Create a paraPr with increased left margin for block quotes.
+
+        Args:
+            level: Nesting level of the block quote (0-based)
+
+        Returns:
+            New paraPr ID string
+        """
+        base_id = self.normal_para_pr_id
+        base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
+        if base_node is None:
+            return base_id
+
+        new_node = copy.deepcopy(base_node)
+        self.max_para_pr_id += 1
+        new_id = str(self.max_para_pr_id)
+        new_node.set('id', new_id)
+
+        indent = self.config.BLOCKQUOTE_LEFT_INDENT + level * self.config.BLOCKQUOTE_INDENT_PER_LEVEL
+
+        for left_node in new_node.findall('.//hc:left', self.namespaces):
+            original_val = int(left_node.get('value', 0))
+            left_node.set('value', str(original_val + indent))
+
+        para_props = self.header_root.find('.//hh:paraProperties', self.namespaces)
+        if para_props is not None:
+            para_props.append(new_node)
+
+        return new_id
+
+    def _handle_blockquote(self, content, level=0):
+        """Handle block quote block.
+
+        Block quotes are rendered as paragraphs with increased left margin.
+        Nested block quotes increase the indent further.
+
+        Args:
+            content: List of inner blocks
+            level: Nesting level (0-based)
+
+        Returns:
+            XML string of the block quote paragraphs
+        """
+        if level >= self.config.MAX_NESTING_DEPTH:
+            logger.warning("Block quote nesting depth limit reached (%d). Flattening.", self.config.MAX_NESTING_DEPTH)
+            # Flatten: treat remaining content at current level
+            level = self.config.MAX_NESTING_DEPTH - 1
+
+        results = []
+        for block in content:
+            b_type = block.get('t')
+            b_content = block.get('c')
+
+            if b_type == 'BlockQuote':
+                # Nested block quote
+                results.append(self._handle_blockquote(b_content, level=level + 1))
+            elif b_type == 'Para' or b_type == 'Plain':
+                bq_para_pr = self._get_blockquote_para_pr(level)
+                para = self._create_para_elem(
+                    style_id=self.normal_style_id,
+                    para_pr_id=bq_para_pr
+                )
+                normal_char_pr_id = 0
+                if self.header_root is not None:
+                    style_node = self.header_root.find(
+                        f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces
+                    )
+                    if style_node is not None:
+                        normal_char_pr_id = int(style_node.get('charPrIDRef', 0))
+                self._process_inlines_to_elems(b_content, para, base_char_pr_id=normal_char_pr_id)
+                results.append(self._elem_to_str(para))
+            else:
+                # Other block types inside blockquote (lists, code, etc.)
+                results.append(self._process_blocks([block]))
+
+        return "\n".join(results)
+
+    def _ensure_hr_border_fill(self):
+        """Create a borderFill for horizontal rules if not already created.
+
+        Returns:
+            borderFill ID string for horizontal rules
+        """
+        if hasattr(self, '_hr_border_fill_id'):
+            return self._hr_border_fill_id
+
+        root = self.header_root
+        if root is None:
+            self._hr_border_fill_id = '1'
+            return self._hr_border_fill_id
+
+        border_fills = root.find('.//hh:borderFills', self.namespaces)
+        if border_fills is None:
+            border_fills = ET.SubElement(root, f'{{{NS_HEAD}}}borderFills')
+
+        max_id = 0
+        for bf in border_fills.findall('hh:borderFill', self.namespaces):
+            bid = int(bf.get('id', 0))
+            if bid > max_id:
+                max_id = bid
+
+        new_id = str(max_id + 1)
+        self._hr_border_fill_id = new_id
+
+        hr_type = self.config.HR_BORDER_TYPE
+        hr_width = self.config.HR_BORDER_WIDTH
+        hr_color = self.config.HR_BORDER_COLOR
+
+        xml_str = f'''<hh:borderFill id="{new_id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
+            <hh:slash type="NONE" Crooked="0" isCounter="0"/>
+            <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
+            <hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>
+            <hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>
+            <hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>
+            <hh:bottomBorder type="{hr_type}" width="{hr_width}" color="{hr_color}"/>
+            <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
+            <hc:fillBrush>
+              <hc:winBrush faceColor="none" hatchColor="#000000" alpha="0"/>
+            </hc:fillBrush>
+        </hh:borderFill>'''.strip()
+
+        new_node = ET.fromstring(xml_str)
+        border_fills.append(new_node)
+
+        return self._hr_border_fill_id
+
+    def _get_hr_para_pr(self):
+        """Create a paraPr for horizontal rule with bottom border.
+
+        Returns:
+            paraPr ID string
+        """
+        if hasattr(self, '_hr_para_pr_id'):
+            return self._hr_para_pr_id
+
+        border_fill_id = self._ensure_hr_border_fill()
+
+        base_id = self.normal_para_pr_id
+        base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
+        if base_node is None:
+            self._hr_para_pr_id = base_id
+            return self._hr_para_pr_id
+
+        new_node = copy.deepcopy(base_node)
+        self.max_para_pr_id += 1
+        new_id = str(self.max_para_pr_id)
+        new_node.set('id', new_id)
+
+        # Set border reference to our HR borderFill
+        border = new_node.find('hh:border', self.namespaces)
+        if border is None:
+            border = ET.SubElement(new_node, f'{{{NS_HEAD}}}border')
+        border.set('borderFillIDRef', border_fill_id)
+        border.set('offsetLeft', '0')
+        border.set('offsetRight', '0')
+        border.set('offsetTop', '0')
+        border.set('offsetBottom', '400')
+        border.set('connect', '0')
+        border.set('ignoreMargin', '0')
+
+        para_props = self.header_root.find('.//hh:paraProperties', self.namespaces)
+        if para_props is not None:
+            para_props.append(new_node)
+
+        self._hr_para_pr_id = new_id
+        return self._hr_para_pr_id
+
+    def _handle_horizontal_rule(self):
+        """Handle horizontal rule block.
+
+        Renders as an empty paragraph with a bottom border line.
+
+        Returns:
+            XML string of the horizontal rule paragraph
+        """
+        hr_para_pr = self._get_hr_para_pr()
+        para = self._create_para_elem(
+            style_id=self.normal_style_id,
+            para_pr_id=hr_para_pr
+        )
+        # Empty run to create a valid paragraph
+        run = self._create_text_run_elem(" ")
+        para.append(run)
+        return self._elem_to_str(para)
+
+    def _get_row_type(self, row_idx, header_row_count, total_body_rows):
+        """Determine row type: HEADER, TOP, MIDDLE, or BOTTOM.
+
+        Args:
+            row_idx: Current row index (0-based, across all rows)
+            header_row_count: Number of header rows
+            total_body_rows: Total number of body rows
+
+        Returns:
+            One of: 'HEADER', 'TOP', 'MIDDLE', 'BOTTOM'
+        """
+        if row_idx < header_row_count:
+            return 'HEADER'
+
+        body_idx = row_idx - header_row_count
+        if total_body_rows <= 1:
+            # If only one body row, it's both TOP and BOTTOM; use TOP
+            return 'TOP'
+
+        if body_idx == 0:
+            return 'TOP'
+        elif body_idx == total_body_rows - 1:
+            return 'BOTTOM'
+        else:
+            return 'MIDDLE'
+
+    def _get_col_type(self, col_idx, total_cols):
+        """Determine column type: LEFT, CENTER, or RIGHT.
+
+        Args:
+            col_idx: Current column index (0-based)
+            total_cols: Total number of columns
+
+        Returns:
+            One of: 'LEFT', 'CENTER', 'RIGHT'
+        """
+        if total_cols <= 1:
+            return 'LEFT'
+
+        if col_idx == 0:
+            return 'LEFT'
+        elif col_idx == total_cols - 1:
+            return 'RIGHT'
+        else:
+            return 'CENTER'
+
+    def _get_cell_style_key(self, row_type, col_type):
+        """Get the cell style key from row and column types.
+
+        Args:
+            row_type: 'HEADER', 'TOP', 'MIDDLE', or 'BOTTOM'
+            col_type: 'LEFT', 'CENTER', or 'RIGHT'
+
+        Returns:
+            Cell style key like 'HEADER_LEFT', 'MIDDLE_CENTER', etc.
+        """
+        return f'{row_type}_{col_type}'
+
     def _handle_table_elem(self, content):
         """Handle table block and return Element (ElementTree version)."""
         # content = [attr, caption, specs, table_head, table_body, table_foot]
@@ -797,26 +1340,33 @@ class MarkdownToHwpx:
         table_foot = content[5]
 
         # Flatten Rows from head, bodies, foot
+        # Track which rows are header rows for cell styling
         all_rows = []
+        header_row_count = 0
 
         # Head Rows
         head_rows = table_head[1]
         for row in head_rows:
             all_rows.append(row)
+            header_row_count += 1
 
-        # Body Rows
+        # Body Rows (count these separately)
+        body_row_count = 0
         for body in table_bodies:
             inter_headers = body[2]
             for row in inter_headers:
                 all_rows.append(row)
+                body_row_count += 1
             main_rows = body[3]
             for row in main_rows:
                 all_rows.append(row)
+                body_row_count += 1
 
-        # Foot Rows
+        # Foot Rows (treat as body)
         foot_rows = table_foot[1]
         for row in foot_rows:
             all_rows.append(row)
+            body_row_count += 1
 
         if not all_rows:
             return None
@@ -824,8 +1374,8 @@ class MarkdownToHwpx:
         row_cnt = len(all_rows)
         col_cnt = len(specs)
 
-        # Calculate Widths
-        TOTAL_TABLE_WIDTH = 45000
+        # Calculate Widths using config
+        TOTAL_TABLE_WIDTH = self.config.TABLE_WIDTH
         col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
 
         # Generate IDs
@@ -876,8 +1426,17 @@ class MarkdownToHwpx:
             'vertOffset': '0',
             'horzOffset': '0'
         })
-        self._add_elem(tbl, NS_PARA, 'outMargin', {'left': '0', 'right': '0', 'top': '0', 'bottom': '1417'})
-        self._add_elem(tbl, NS_PARA, 'inMargin', {'left': '510', 'right': '510', 'top': '141', 'bottom': '141'})
+        self._add_elem(tbl, NS_PARA, 'outMargin', {
+            'left': '0', 'right': '0', 'top': '0',
+            'bottom': str(self.config.TABLE_OUT_MARGIN_BOTTOM)
+        })
+        cell_margin = self.config.CELL_MARGIN_DEFAULT
+        self._add_elem(tbl, NS_PARA, 'inMargin', {
+            'left': str(cell_margin['left']),
+            'right': str(cell_margin['right']),
+            'top': str(cell_margin['top']),
+            'bottom': str(cell_margin['bottom'])
+        })
 
         # Generate Rows
         occupied_cells = set()
@@ -895,6 +1454,7 @@ class MarkdownToHwpx:
 
                 actual_col = curr_col_addr
 
+                cell_align = cell[1]  # e.g., 'AlignLeft', 'AlignCenter', 'AlignRight', 'AlignDefault'
                 rowspan = cell[2]
                 colspan = cell[3]
                 cell_blocks = cell[4]
@@ -913,15 +1473,35 @@ class MarkdownToHwpx:
 
                 sublist_id = str(int(time.time() * 100000) % 1000000000 + random.randint(0, 100000))
 
+                # Determine cell style based on position
+                row_type = self._get_row_type(curr_row_addr, header_row_count, body_row_count)
+                col_type = self._get_col_type(actual_col, col_cnt)
+                cell_style_key = self._get_cell_style_key(row_type, col_type)
+
+                # Get cell style from placeholder or use defaults
+                cell_style = self.cell_styles.get(cell_style_key, {})
+
+                # Get borderFillIDRef from cell style or use default
+                border_fill_id = cell_style.get('borderFillIDRef', str(self.table_border_fill_id))
+
+                # Get cell margin from cell style or use defaults
+                default_margin = self.config.CELL_MARGIN_DEFAULT
+                cell_margin = cell_style.get('cellMargin', {
+                    'left': str(default_margin['left']),
+                    'right': str(default_margin['right']),
+                    'top': str(default_margin['top']),
+                    'bottom': str(default_margin['bottom'])
+                })
+
                 # Cell element
                 tc = self._add_elem(tr, NS_PARA, 'tc', {
                     'name': '',
-                    'header': '0',
+                    'header': '1' if row_type == 'HEADER' else '0',
                     'hasMargin': '0',
                     'protect': '0',
                     'editable': '0',
                     'dirty': '0',
-                    'borderFillIDRef': str(self.table_border_fill_id)
+                    'borderFillIDRef': border_fill_id
                 })
 
                 # SubList with content
@@ -938,18 +1518,31 @@ class MarkdownToHwpx:
                     'hasNumRef': '0'
                 })
 
+                # Determine paragraph alignment for cell content
+                hwpx_align = self._pandoc_align_to_hwpx(cell_align)
+
                 # Process cell blocks and add to sublist
                 cell_content_xml = self._process_blocks(cell_blocks)
                 if cell_content_xml.strip():
                     wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{cell_content_xml}</root>'
                     for elem in ET.fromstring(wrapper):
+                        # Apply alignment to paragraph elements
+                        if hwpx_align and elem.tag.endswith('}p'):
+                            aligned_pr = self._get_aligned_para_pr(hwpx_align)
+                            if aligned_pr:
+                                elem.set('paraPrIDRef', aligned_pr)
                         sublist.append(elem)
 
                 # Cell properties
                 self._add_elem(tc, NS_PARA, 'cellAddr', {'colAddr': str(actual_col), 'rowAddr': str(curr_row_addr)})
                 self._add_elem(tc, NS_PARA, 'cellSpan', {'colSpan': str(colspan), 'rowSpan': str(rowspan)})
                 self._add_elem(tc, NS_PARA, 'cellSz', {'width': str(cell_width), 'height': '1000'})
-                self._add_elem(tc, NS_PARA, 'cellMargin', {'left': '510', 'right': '510', 'top': '141', 'bottom': '141'})
+                self._add_elem(tc, NS_PARA, 'cellMargin', {
+                    'left': str(cell_margin.get('left', '510')),
+                    'right': str(cell_margin.get('right', '510')),
+                    'top': str(cell_margin.get('top', '141')),
+                    'bottom': str(cell_margin.get('bottom', '141'))
+                })
 
                 curr_col_addr += colspan
 
@@ -1177,7 +1770,7 @@ class MarkdownToHwpx:
         unit = match.group(2)
 
         # HWP Unit: 1 mm = 283.465 LUnit
-        LUNIT_PER_MM = 283.465
+        LUNIT_PER_MM = self.config.LUNIT_PER_MM
 
         mm_val = 0
 
@@ -1218,15 +1811,30 @@ class MarkdownToHwpx:
 
         target_url = target[0]
 
+        # Validate image path against directory traversal
+        try:
+            self._validate_image_path(target_url, self.input_dir)
+        except SecurityError as e:
+            logger.warning("Skipping image with invalid path: %s", e)
+            return self._create_text_run_elem(f"[Image: {target_url}]", char_pr_id)
+
+        # Validate image count limit
+        if len(self.images) >= self.config.MAX_IMAGE_COUNT:
+            logger.warning(
+                "Image count limit reached (%d). Skipping image: %s",
+                self.config.MAX_IMAGE_COUNT, target_url
+            )
+            return self._create_text_run_elem(f"[Image limit exceeded: {target_url}]", char_pr_id)
+
         # Parse Attributes for Width/Height
         attrs_map = dict(attr[2])
 
         width_attr = attrs_map.get('width')
         height_attr = attrs_map.get('height')
 
-        # Default Size
-        width_hwp = 8504  # ~30mm (30 * 283.465)
-        height_hwp = 8504
+        # Default Size (from config)
+        width_hwp = self.config.IMAGE_DEFAULT_WIDTH
+        height_hwp = self.config.IMAGE_DEFAULT_HEIGHT
 
         w_parsed = self._parse_dimension(width_attr)
         h_parsed = self._parse_dimension(height_attr)
@@ -1261,7 +1869,7 @@ class MarkdownToHwpx:
                 pass
 
             if image_found:
-                LUNIT_PER_PX = (25.4 * 283.465) / 96.0
+                LUNIT_PER_PX = self.config.LUNIT_PER_PX
 
                 calc_w = int(px_width * LUNIT_PER_PX)
                 calc_h = int(px_height * LUNIT_PER_PX)
@@ -1276,8 +1884,8 @@ class MarkdownToHwpx:
                     ratio = px_width / px_height
                     width_hwp = int(h_parsed * ratio)
 
-        # --- Max Width Constraint (15cm) ---
-        MAX_WIDTH_HWP = int(150 * 283.465)
+        # --- Max Width Constraint (from config) ---
+        MAX_WIDTH_HWP = self.config.IMAGE_MAX_WIDTH
 
         if width_hwp > MAX_WIDTH_HWP:
             ratio = MAX_WIDTH_HWP / width_hwp
@@ -1679,7 +2287,7 @@ class MarkdownToHwpx:
         heading.set('idRef', str(num_id))
         heading.set('level', str(level))
 
-        indent_per_level = 2000
+        indent_per_level = self.config.LIST_INDENT_PER_LEVEL
         current_indent = (level) * indent_per_level
 
         for margin_node in new_node.findall('.//hc:left', self.namespaces):
@@ -1687,7 +2295,7 @@ class MarkdownToHwpx:
             new_val = original_val + current_indent
             margin_node.set('value', str(new_val))
 
-        hanging_val = 2000
+        hanging_val = self.config.LIST_HANGING_INDENT
         for intent_node in new_node.findall('.//hc:intent', self.namespaces):
             intent_node.set('value', str(-hanging_val))
 
@@ -1701,50 +2309,60 @@ class MarkdownToHwpx:
 
         return new_id
 
-    def _handle_bullet_list(self, content, level=0):
-        # Always create new numbering for isolation
-        # Unless we pass num_id?
-        # For Bullet, one generic ID is usually fine since symbols don't increment.
-        # But to be consistent with architecture and avoid side effects (like accidental levels),
-        # let's use unique IDs or at least unique per "List Block".
-        # Actually for Bullet, all bullets are same. Sharing ID is fine.
-        # But if we mix Bullet/Ordered, better to be clean.
-        # Let's stick to Create New for now.
+    def _handle_bullet_list_elem(self, content, level=0):
+        """Handle bullet list and return list of Elements (ElementTree version)."""
+        if level >= self.config.MAX_NESTING_DEPTH:
+            logger.warning("Bullet list nesting depth limit reached (%d). Flattening.", self.config.MAX_NESTING_DEPTH)
+            level = self.config.MAX_NESTING_DEPTH - 1
 
         num_id = self._create_numbering('BULLET')
 
-        results = []
+        elements = []
         for item_blocks in content:
-            for i, block in enumerate(item_blocks):
+            for block in item_blocks:
                 b_type = block.get('t')
                 b_content = block.get('c')
 
                 list_para_pr = self._get_list_para_pr(num_id, level)
 
                 if b_type == 'Para' or b_type == 'Plain':
-                     xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=list_para_pr)
-                     xml += self._process_inlines(b_content)
-                     xml += '</hp:p>'
-                     results.append(xml)
+                    para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=list_para_pr)
+                    self._process_inlines_to_elems(b_content, para)
+                    elements.append(para)
                 elif b_type == 'BulletList':
-                    results.append(self._handle_bullet_list(b_content, level=level+1))
+                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
                 elif b_type == 'OrderedList':
-                    results.append(self._handle_ordered_list(b_content, level=level+1))
+                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
                 else:
-                    results.append(self._process_blocks([block]))
+                    # For other block types, use legacy processing
+                    block_xml = self._process_blocks([block])
+                    if block_xml.strip():
+                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
+                        for elem in ET.fromstring(wrapper):
+                            elements.append(elem)
 
-        return "\n".join(results)
+        return elements
 
-    def _handle_ordered_list(self, content, level=0):
+    def _handle_bullet_list(self, content, level=0):
+        """Handle bullet list (legacy wrapper returning string)."""
+        elements = self._handle_bullet_list_elem(content, level)
+        return "\n".join(self._elem_to_str(elem) for elem in elements)
+
+    def _handle_ordered_list_elem(self, content, level=0):
+        """Handle ordered list and return list of Elements (ElementTree version)."""
+        if level >= self.config.MAX_NESTING_DEPTH:
+            logger.warning("Ordered list nesting depth limit reached (%d). Flattening.", self.config.MAX_NESTING_DEPTH)
+            level = self.config.MAX_NESTING_DEPTH - 1
+
         # content = [ [start, style, delim], [items] ]
         attrs = content[0]
-        start_num = attrs[0] # The start number
+        start_num = attrs[0]  # The start number
         items = content[1]
 
         # Create UNIQUE ID for this list block
         num_id = self._create_numbering('ORDERED', start_num=start_num)
 
-        results = []
+        elements = []
         for item_blocks in items:
             for block in item_blocks:
                 b_type = block.get('t')
@@ -1753,17 +2371,25 @@ class MarkdownToHwpx:
                 list_para_pr = self._get_list_para_pr(num_id, level)
 
                 if b_type == 'Para' or b_type == 'Plain':
-                     xml = self._create_para_start(style_id=self.normal_style_id, para_pr_id=list_para_pr)
-                     xml += self._process_inlines(b_content)
-                     xml += '</hp:p>'
-                     results.append(xml)
+                    para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=list_para_pr)
+                    self._process_inlines_to_elems(b_content, para)
+                    elements.append(para)
                 elif b_type == 'BulletList':
-                     results.append(self._handle_bullet_list(b_content, level=level+1))
+                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
                 elif b_type == 'OrderedList':
-                     # Recursively handle nested ordered list
-                     # New ID will be created for it, ensuring isolation/restart
-                     results.append(self._handle_ordered_list(b_content, level=level+1))
+                    # Recursively handle nested ordered list
+                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
                 else:
-                     results.append(self._process_blocks([block]))
+                    # For other block types, use legacy processing
+                    block_xml = self._process_blocks([block])
+                    if block_xml.strip():
+                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
+                        for elem in ET.fromstring(wrapper):
+                            elements.append(elem)
 
-        return "\n".join(results)
+        return elements
+
+    def _handle_ordered_list(self, content, level=0):
+        """Handle ordered list (legacy wrapper returning string)."""
+        elements = self._handle_ordered_list_elem(content, level)
+        return "\n".join(self._elem_to_str(elem) for elem in elements)
