@@ -1,9 +1,11 @@
 import copy
+import random
 import re
 import sys
 import os
 import io
 import shutil
+import time
 import zipfile
 import json
 import logging
@@ -26,7 +28,6 @@ NS_SEC = 'http://www.hancom.co.kr/hwpml/2011/section'
 class MarkdownToHwpx:
     def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None, config=None):
         self.ast = json_ast
-        self.output = []
         self.header_xml_content = header_xml_content
         self.section_xml_content = section_xml_content
 
@@ -37,17 +38,6 @@ class MarkdownToHwpx:
         self.input_dir = None
         if input_path:
             self.input_dir = os.path.dirname(os.path.abspath(input_path))
-
-        # Default Style Mappings (Fallback)
-        self.STYLE_MAP = {
-            'Normal': 0,
-            'Header1': 1,
-            'Header2': 2,
-            'Header3': 3,
-            'Header4': 4,
-            'Header5': 5,
-            'Header6': 6,
-        }
 
         # Dynamic Style Mappings from header.xml
         self.dynamic_style_map = {}
@@ -354,6 +344,7 @@ class MarkdownToHwpx:
                             out_zip.writestr(item, ref_zip.read(fname))
         except Exception as e:
              logger.error("HWPX creation failed: %s", e, exc_info=True)
+             raise
         finally:
              if input_zip:
                  input_zip.close()
@@ -413,7 +404,7 @@ class MarkdownToHwpx:
         border_fills = root.find('.//hh:borderFills', self.namespaces)
         if border_fills is None:
              # Should practically always exist in valid hwpx, but if not:
-             border_fills = ET.SubElement(root, '{http://www.hancom.co.kr/hwpml/2011/head}borderFills')
+             border_fills = ET.SubElement(root, f'{{{NS_HEAD}}}borderFills')
 
         max_id = 0
         for bf in border_fills.findall('hh:borderFill', self.namespaces):
@@ -971,49 +962,41 @@ class MarkdownToHwpx:
         self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
         return self._elem_to_str(para)
 
-    def _handle_para(self, content):
-        # Check for BODY placeholder style first
-        if 'BODY' in self.placeholder_styles:
-            props = self.placeholder_styles['BODY']
+    def _handle_text_block(self, content, placeholder_name='BODY'):
+        """Handle paragraph-like block (Para, Plain).
+
+        Args:
+            content: List of inline elements
+            placeholder_name: Name of placeholder style to use (default: 'BODY')
+
+        Returns:
+            XML string of the paragraph
+        """
+        if placeholder_name in self.placeholder_styles:
+            props = self.placeholder_styles[placeholder_name]
             char_pr_id = props['charPrIDRef']
             para_pr_id = props['paraPrIDRef']
+        else:
+            char_pr_id = 0
+            para_pr_id = self.normal_para_pr_id
+            if self.header_root is not None:
+                style_node = self.header_root.find(
+                    f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces
+                )
+                if style_node is not None:
+                    char_pr_id = style_node.get('charPrIDRef', 0)
 
-            para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=para_pr_id)
-            self._process_inlines_to_elems(content, para, base_char_pr_id=int(char_pr_id))
-            return self._elem_to_str(para)
-
-        # Fallback to existing logic
-        normal_char_pr_id = 0
-        if self.header_root is not None:
-            style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
-            if style_node is not None:
-                normal_char_pr_id = style_node.get('charPrIDRef', 0)
-
-        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
-        self._process_inlines_to_elems(content, para, base_char_pr_id=int(normal_char_pr_id))
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=para_pr_id)
+        self._process_inlines_to_elems(content, para, base_char_pr_id=int(char_pr_id))
         return self._elem_to_str(para)
+
+    def _handle_para(self, content):
+        """Handle Para block."""
+        return self._handle_text_block(content, 'BODY')
 
     def _handle_plain(self, content):
-        # Check for BODY placeholder style first (same as Para)
-        if 'BODY' in self.placeholder_styles:
-            props = self.placeholder_styles['BODY']
-            char_pr_id = props['charPrIDRef']
-            para_pr_id = props['paraPrIDRef']
-
-            para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=para_pr_id)
-            self._process_inlines_to_elems(content, para, base_char_pr_id=int(char_pr_id))
-            return self._elem_to_str(para)
-
-        # Fallback to existing logic
-        normal_char_pr_id = 0
-        if self.header_root is not None:
-            style_node = self.header_root.find(f'.//hh:style[@id="{self.normal_style_id}"]', self.namespaces)
-            if style_node is not None:
-                normal_char_pr_id = style_node.get('charPrIDRef', 0)
-
-        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
-        self._process_inlines_to_elems(content, para, base_char_pr_id=int(normal_char_pr_id))
-        return self._elem_to_str(para)
+        """Handle Plain block."""
+        return self._handle_text_block(content, 'BODY')
 
     def _handle_code_block(self, content):
         # Code formatting? IDK...
@@ -1085,14 +1068,21 @@ class MarkdownToHwpx:
         return new_id
 
     def _get_blockquote_para_pr(self, level=0):
-        """Create a paraPr with increased left margin for block quotes.
+        """Create or retrieve a paraPr with increased left margin for block quotes.
 
         Args:
             level: Nesting level of the block quote (0-based)
 
         Returns:
-            New paraPr ID string
+            paraPr ID string
         """
+        # Check cache first
+        if not hasattr(self, '_blockquote_para_pr_cache'):
+            self._blockquote_para_pr_cache = {}
+
+        if level in self._blockquote_para_pr_cache:
+            return self._blockquote_para_pr_cache[level]
+
         base_id = self.normal_para_pr_id
         base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
         if base_node is None:
@@ -1113,6 +1103,8 @@ class MarkdownToHwpx:
         if para_props is not None:
             para_props.append(new_node)
 
+        # Cache the result
+        self._blockquote_para_pr_cache[level] = new_id
         return new_id
 
     def _handle_blockquote(self, content, level=0):
@@ -1379,8 +1371,6 @@ class MarkdownToHwpx:
         col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
 
         # Generate IDs
-        import time
-        import random
         tbl_id = str(int(time.time() * 1000) % 100000000 + random.randint(0, 10000))
 
         # Create paragraph > run > table structure
@@ -1560,98 +1550,19 @@ class MarkdownToHwpx:
     # --- INLINE PROCESSING & FORMATTING ---
 
     def _process_inlines(self, inlines, base_char_pr_id=0, active_formats=None):
+        """Process inlines and return XML string.
+
+        This is a wrapper around _process_inlines_to_elems for backward compatibility.
+        """
         if not isinstance(inlines, list):
             return ""
 
-        if active_formats is None:
-            active_formats = set()
+        # Create temporary parent element
+        temp_parent = ET.Element('temp')
+        self._process_inlines_to_elems(inlines, temp_parent, base_char_pr_id, active_formats)
 
-        # Helper to get current combined ID
-        def get_current_id():
-            return self._get_char_pr_id(base_char_pr_id, active_formats)
-
-        results = []
-        for item in inlines:
-            i_type = item.get('t')
-            i_content = item.get('c')
-
-            if i_type == 'Str':
-                results.append(self._create_text_run(i_content, char_pr_id=get_current_id()))
-            elif i_type == 'Space':
-                results.append(self._create_text_run(" ", char_pr_id=get_current_id()))
-            elif i_type == 'Strong':
-                # Add 'BOLD' to formats
-                new_formats = active_formats.copy()
-                new_formats.add('BOLD')
-                results.append(self._process_inlines(i_content, base_char_pr_id, new_formats))
-            elif i_type == 'Emph':
-                # Add 'ITALIC' to formats
-                new_formats = active_formats.copy()
-                new_formats.add('ITALIC')
-                results.append(self._process_inlines(i_content, base_char_pr_id, new_formats))
-            elif i_type == 'Underline':
-                # Add 'UNDERLINE'
-                new_formats = active_formats.copy()
-                new_formats.add('UNDERLINE')
-                results.append(self._process_inlines(i_content, base_char_pr_id, new_formats))
-            elif i_type == 'Superscript':
-                new_formats = active_formats.copy()
-                new_formats.add('SUPERSCRIPT')
-                results.append(self._process_inlines(i_content, base_char_pr_id, new_formats))
-            elif i_type == 'Subscript':
-                new_formats = active_formats.copy()
-                new_formats.add('SUBSCRIPT')
-                results.append(self._process_inlines(i_content, base_char_pr_id, new_formats))
-
-            elif i_type == 'Link':
-                # Link = [attr, [text_inlines], [target, title]]
-                # text_content is i_content[1] (list of inlines)
-                # target is i_content[2][0]
-                text_inlines = i_content[1]
-                target_url = i_content[2][0]
-
-                # 1. Field Begin
-                results.append(self._create_field_begin(target_url))
-
-                # 2. Field Content (Styled Blue + Underline)
-                new_formats = active_formats.copy()
-                new_formats.add('UNDERLINE')
-                new_formats.add('COLOR_BLUE')
-                results.append(self._process_inlines(text_inlines, base_char_pr_id, new_formats))
-
-                # 3. Field End
-                results.append(self._create_field_end())
-
-            elif i_type == 'Note':
-                 # Footnote. content is list of blocks.
-                 # HWPX Footnote is an inline control containing blocks.
-                 note_blocks = i_content
-                 results.append(self._create_footnote(note_blocks))
-
-            elif i_type == 'Code':
-                 # Code style? Monospace?
-                 # Maybe add logic later. For now just text.
-                 results.append(self._create_text_run(i_content[1], char_pr_id=get_current_id()))
-
-            elif i_type == 'Image':
-                # Image = [attr, [caption], [target, title]]
-                results.append(self._handle_image(i_content, char_pr_id=get_current_id()))
-
-            elif i_type == 'SoftBreak':
-                # SoftBreak -> Space (usually)
-                results.append(self._create_text_run(" ", char_pr_id=get_current_id()))
-
-            elif i_type == 'LineBreak':
-                 run = self._create_run_elem(char_pr_id=get_current_id())
-                 t_elem = self._add_elem(run, NS_PARA, 't')
-                 self._add_elem(t_elem, NS_PARA, 'lineBreak')
-                 results.append(self._elem_to_str(run))
-
-            else:
-                # Fallback
-                 pass
-
-        return "".join(results)
+        # Serialize children
+        return ''.join(ET.tostring(child, encoding='unicode') for child in temp_parent)
 
     def _create_linebreak_run_elem(self, char_pr_id=0):
         """Create a run element containing a line break."""
@@ -1896,9 +1807,6 @@ class MarkdownToHwpx:
         height = height_hwp
 
         # Generate Binary ID
-        import time
-        import random
-
         timestamp = int(time.time() * 1000)
         rand = random.randint(0, 1000000)
         binary_item_id = f"img_{timestamp}_{rand}"
@@ -2007,7 +1915,6 @@ class MarkdownToHwpx:
 
     def _create_field_begin_elem(self, url):
         """Create field begin element for hyperlink (ElementTree version)."""
-        import time
         fid = str(int(time.time() * 1000) % 100000000)
         self.last_field_id = fid
 
@@ -2058,7 +1965,6 @@ class MarkdownToHwpx:
 
     def _create_footnote_elem(self, blocks):
         """Create footnote element (ElementTree version)."""
-        import random
         inst_id = str(random.randint(1000000, 999999999))
 
         # Create run > ctrl > footNote structure
@@ -2137,16 +2043,16 @@ class MarkdownToHwpx:
         # Modify properties based on formats
         if 'BOLD' in active_formats:
             if new_node.find('hh:bold', self.namespaces) is None:
-                ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}bold')
+                ET.SubElement(new_node, f'{{{NS_HEAD}}}bold')
 
         if 'ITALIC' in active_formats:
             if new_node.find('hh:italic', self.namespaces) is None:
-                ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}italic')
+                ET.SubElement(new_node, f'{{{NS_HEAD}}}italic')
 
         if 'UNDERLINE' in active_formats:
             ul = new_node.find('hh:underline', self.namespaces)
             if ul is None:
-                ul = ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}underline')
+                ul = ET.SubElement(new_node, f'{{{NS_HEAD}}}underline')
             ul.set('type', 'BOTTOM')
             ul.set('shape', 'SOLID')
             ul.set('color', '#000000')
@@ -2158,7 +2064,7 @@ class MarkdownToHwpx:
             # Blue: #0000FF
             tc = new_node.find('hh:textColor', self.namespaces)
             if tc is None:
-                tc = ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}textColor')
+                tc = ET.SubElement(new_node, f'{{{NS_HEAD}}}textColor')
             tc.set('value', '#0000FF')
 
             # Also force underline color to Blue if underline exists?
@@ -2171,14 +2077,14 @@ class MarkdownToHwpx:
              if sub is not None:
                  new_node.remove(sub)
              if new_node.find('hh:supscript', self.namespaces) is None:
-                ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}supscript')
+                ET.SubElement(new_node, f'{{{NS_HEAD}}}supscript')
 
         elif 'SUBSCRIPT' in active_formats:
              sup = new_node.find('hh:supscript', self.namespaces)
              if sup is not None:
                  new_node.remove(sup)
              if new_node.find('hh:subscript', self.namespaces) is None:
-                ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}subscript')
+                ET.SubElement(new_node, f'{{{NS_HEAD}}}subscript')
 
         # 4. Add to Header
         char_props = self.header_root.find('.//hh:charProperties', self.namespaces)
@@ -2227,7 +2133,7 @@ class MarkdownToHwpx:
             # Safe to append to root for now, or find insertion point.
             # But XML standard requires order.
             # root is <hh:head>. Children: ...
-            numberings_node = ET.SubElement(root, '{http://www.hancom.co.kr/hwpml/2011/head}numberings')
+            numberings_node = ET.SubElement(root, f'{{{NS_HEAD}}}numberings')
 
     def _create_numbering(self, type='ORDERED', start_num=1):
         # 1. Generate New ID
@@ -2282,7 +2188,7 @@ class MarkdownToHwpx:
 
         heading = new_node.find('hh:heading', self.namespaces)
         if heading is None:
-            heading = ET.SubElement(new_node, '{http://www.hancom.co.kr/hwpml/2011/head}heading')
+            heading = ET.SubElement(new_node, f'{{{NS_HEAD}}}heading')
         heading.set('type', 'NUMBER')
         heading.set('idRef', str(num_id))
         heading.set('level', str(level))
