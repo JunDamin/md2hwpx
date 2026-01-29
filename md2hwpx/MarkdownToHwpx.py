@@ -715,9 +715,20 @@ class MarkdownToHwpx:
                         if list_match:
                             list_type = list_match.group(1).upper()  # BULLET or ORDERED
                             level = int(list_match.group(2))
+
+                            # Extract prefix text (text before {{...}})
+                            full_text = text_elem.text
+                            prefix = full_text[:list_match.start()]
+
+                            # Check if paraPr uses numbering
+                            has_numbering, num_pr_id = self._check_para_pr_has_numbering(para_pr_id)
+
                             list_styles[(list_type, level)] = {
                                 'charPrIDRef': char_pr_id,
                                 'paraPrIDRef': para_pr_id,
+                                'mode': 'numbering' if has_numbering else 'prefix',
+                                'prefix': prefix if not has_numbering else None,
+                                'numPrIDRef': num_pr_id if has_numbering else None,
                             }
                             continue
 
@@ -831,6 +842,32 @@ class MarkdownToHwpx:
         if win_brush is not None:
             return win_brush.get('faceColor', 'none')
         return 'none'
+
+    def _check_para_pr_has_numbering(self, para_pr_id):
+        """Check if a paraPr has numPr (numbering) reference.
+
+        Args:
+            para_pr_id: The paraPr ID to check
+
+        Returns:
+            tuple: (has_numbering: bool, numPrIDRef: str or None)
+        """
+        if self.header_root is None:
+            return False, None
+
+        para_pr = self.header_root.find(
+            f'.//hh:paraPr[@id="{para_pr_id}"]',
+            self.namespaces
+        )
+        if para_pr is None:
+            return False, None
+
+        num_pr = para_pr.find('hh:numPr', self.namespaces)
+        if num_pr is not None:
+            num_pr_id = num_pr.get('numPrIDRef')
+            return True, num_pr_id
+
+        return False, None
 
     def convert(self, page_setup_xml=None):
         blocks = self.ast.get('blocks', [])
@@ -2270,6 +2307,21 @@ class MarkdownToHwpx:
             logger.warning("Bullet list nesting depth limit reached (%d). Flattening.", self.config.MAX_NESTING_DEPTH)
             level = self.config.MAX_NESTING_DEPTH - 1
 
+        # Check if template defines style for this list level
+        list_key = ('BULLET', level + 1)  # Template uses 1-indexed levels
+
+        if list_key in self.list_styles:
+            style_info = self.list_styles[list_key]
+            mode = style_info.get('mode', 'prefix')
+
+            if mode == 'numbering':
+                # USE TEMPLATE NUMBERING
+                return self._handle_template_numbering_list_elem(content, 'BULLET', level)
+            else:
+                # USE PREFIX MODE
+                return self._handle_prefix_list_elem(content, 'BULLET', level)
+
+        # FALLBACK to existing auto-numbering (create new)
         num_id = self._create_numbering('BULLET')
 
         elements = []
@@ -2314,7 +2366,21 @@ class MarkdownToHwpx:
         start_num = attrs[0]  # The start number
         items = content[1]
 
-        # Create UNIQUE ID for this list block
+        # Check if template defines style for this list level
+        list_key = ('ORDERED', level + 1)  # Template uses 1-indexed levels
+
+        if list_key in self.list_styles:
+            style_info = self.list_styles[list_key]
+            mode = style_info.get('mode', 'prefix')
+
+            if mode == 'numbering':
+                # USE TEMPLATE NUMBERING
+                return self._handle_template_numbering_list_elem(items, 'ORDERED', level)
+            else:
+                # USE PREFIX MODE
+                return self._handle_prefix_list_elem(items, 'ORDERED', level, start_num=start_num)
+
+        # FALLBACK to existing auto-numbering (create new)
         num_id = self._create_numbering('ORDERED', start_num=start_num)
 
         elements = []
@@ -2348,3 +2414,142 @@ class MarkdownToHwpx:
         """Handle ordered list (legacy wrapper returning string)."""
         elements = self._handle_ordered_list_elem(content, level)
         return "\n".join(self._elem_to_str(elem) for elem in elements)
+
+    def _format_list_prefix(self, prefix_template, list_type, counter):
+        """Format list prefix, incrementing numbers/letters for ordered lists.
+
+        Args:
+            prefix_template: Original prefix from template (e.g., "1. ", "가. ")
+            list_type: 'BULLET' or 'ORDERED'
+            counter: Current item number (1-indexed)
+
+        Returns:
+            Formatted prefix string
+        """
+        if list_type == 'BULLET':
+            return prefix_template  # Bullets don't change
+
+        # For ordered lists, increment the number/letter
+        # Arabic numerals: 1. → 2. → 3.
+        if re.search(r'\d+', prefix_template):
+            return re.sub(r'\d+', str(counter), prefix_template, count=1)
+
+        # Korean syllables: 가. → 나. → 다.
+        korean_jamo = '가나다라마바사아자차카타파하'
+        match = re.search(r'[가-하]', prefix_template)
+        if match and counter <= len(korean_jamo):
+            return prefix_template[:match.start()] + korean_jamo[counter-1] + prefix_template[match.end():]
+
+        # Fallback: return as-is
+        return prefix_template
+
+    def _handle_prefix_list_elem(self, content, list_type, level=0, start_num=1):
+        """Handle list using prefix-based rendering (plain paragraphs with prefix text).
+
+        Args:
+            content: List items from AST
+            list_type: 'BULLET' or 'ORDERED'
+            level: Nesting level (0-indexed)
+            start_num: Starting number for ordered lists
+
+        Returns:
+            List of paragraph Elements
+        """
+        elements = []
+        list_key = (list_type, level + 1)  # 1-indexed in template
+        style_info = self.list_styles.get(list_key, {})
+
+        prefix = style_info.get('prefix', '')
+        char_pr_id = int(style_info.get('charPrIDRef', 0))
+        para_pr_id = int(style_info.get('paraPrIDRef', self.normal_para_pr_id))
+
+        # For ordered lists, track counter to increment prefix numbers
+        item_counter = start_num
+
+        for item_blocks in content:
+            for block in item_blocks:
+                b_type = block.get('t')
+                b_content = block.get('c')
+
+                if b_type in ('Para', 'Plain'):
+                    # Create paragraph with template styles
+                    para = self._create_para_elem(
+                        style_id=self.normal_style_id,
+                        para_pr_id=para_pr_id
+                    )
+
+                    # Format prefix (increment numbers for ordered lists)
+                    current_prefix = self._format_list_prefix(prefix, list_type, item_counter)
+
+                    # Add prefix as first run
+                    if current_prefix:
+                        prefix_run = self._create_text_run_elem(current_prefix, char_pr_id)
+                        para.append(prefix_run)
+
+                    # Add content
+                    self._process_inlines_to_elems(b_content, para, base_char_pr_id=char_pr_id)
+                    elements.append(para)
+
+                    item_counter += 1
+
+                elif b_type == 'BulletList':
+                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
+                elif b_type == 'OrderedList':
+                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
+                else:
+                    # Other block types - use existing processing
+                    block_xml = self._process_blocks([block])
+                    if block_xml.strip():
+                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
+                        for elem in ET.fromstring(wrapper):
+                            elements.append(elem)
+
+        return elements
+
+    def _handle_template_numbering_list_elem(self, content, list_type, level=0):
+        """Handle list using template's numbering definition.
+
+        The template's paraPr already references the correct numbering style,
+        so we just use the paraPrIDRef directly.
+
+        Args:
+            content: List items from AST
+            list_type: 'BULLET' or 'ORDERED'
+            level: Nesting level (0-indexed)
+
+        Returns:
+            List of paragraph Elements
+        """
+        elements = []
+        list_key = (list_type, level + 1)
+        style_info = self.list_styles.get(list_key, {})
+
+        char_pr_id = int(style_info.get('charPrIDRef', 0))
+        para_pr_id = int(style_info.get('paraPrIDRef', self.normal_para_pr_id))
+
+        for item_blocks in content:
+            for block in item_blocks:
+                b_type = block.get('t')
+                b_content = block.get('c')
+
+                if b_type in ('Para', 'Plain'):
+                    # Use template's paraPr (which has numbering reference)
+                    para = self._create_para_elem(
+                        style_id=self.normal_style_id,
+                        para_pr_id=para_pr_id
+                    )
+                    self._process_inlines_to_elems(b_content, para, base_char_pr_id=char_pr_id)
+                    elements.append(para)
+
+                elif b_type == 'BulletList':
+                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
+                elif b_type == 'OrderedList':
+                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
+                else:
+                    block_xml = self._process_blocks([block])
+                    if block_xml.strip():
+                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
+                        for elem in ET.fromstring(wrapper):
+                            elements.append(elem)
+
+        return elements
