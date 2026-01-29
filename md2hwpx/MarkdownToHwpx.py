@@ -120,24 +120,23 @@ class MarkdownToHwpx:
         return "".join(text)
 
     @staticmethod
-    def convert_to_hwpx(input_path, output_path, reference_path, json_ast=None, config=None):
-        """
-        Convert Markdown to HWPX.
+    def _validate_inputs(input_path, reference_path, json_ast, config):
+        """Validate input files and parameters.
 
         Args:
-            input_path: Original input file path (for image resolution)
-            output_path: Output HWPX file path
-            reference_path: Reference HWPX for styles
-            json_ast: Pre-parsed Pandoc-like AST dict (from MarkoToPandocAdapter)
-            config: Optional ConversionConfig instance
+            input_path: Original input file path
+            reference_path: Reference HWPX template path
+            json_ast: Pre-parsed Pandoc-like AST dict
+            config: ConversionConfig instance
+
+        Raises:
+            TemplateError: If template is missing or invalid
+            ConversionError: If json_ast is None
+            SecurityError: If file sizes exceed limits
         """
-        if config is None:
-            config = DEFAULT_CONFIG
-
         if not os.path.exists(reference_path):
-             raise TemplateError(f"Reference template not found: {reference_path}")
+            raise TemplateError(f"Reference template not found: {reference_path}")
 
-        # AST is now passed in, not generated via pypandoc
         if json_ast is None:
             raise ConversionError("json_ast parameter is required")
 
@@ -160,11 +159,19 @@ class MarkdownToHwpx:
         if not zipfile.is_zipfile(reference_path):
             raise TemplateError(f"Reference template is not a valid HWPX (ZIP) file: {reference_path}")
 
-        # 2. Read Reference (Header & Section0)
-        header_xml_content = ""
-        section_xml_content = ""
-        page_setup_xml = None
+    @staticmethod
+    def _read_template(reference_path):
+        """Read header.xml, section0.xml, and page setup from template.
 
+        Args:
+            reference_path: Path to the reference HWPX template
+
+        Returns:
+            tuple: (header_xml_content, section_xml_content, page_setup_xml, ref_doc_bytes)
+
+        Raises:
+            TemplateError: If template is corrupted or missing required files
+        """
         with open(reference_path, 'rb') as f:
             ref_doc_bytes = f.read()
 
@@ -172,6 +179,10 @@ class MarkdownToHwpx:
             ref_zip = zipfile.ZipFile(io.BytesIO(ref_doc_bytes))
         except zipfile.BadZipFile:
             raise TemplateError(f"Corrupted HWPX template file: {reference_path}")
+
+        header_xml_content = ""
+        section_xml_content = ""
+        page_setup_xml = None
 
         with ref_zip as z:
             required_files = ["Contents/header.xml", "Contents/section0.xml"]
@@ -195,159 +206,229 @@ class MarkdownToHwpx:
                         'hc': 'http://www.hancom.co.kr/hwpml/2011/core'
                     }
                     for p, u in ns.items():
-                         ET.register_namespace(p, u)
+                        ET.register_namespace(p, u)
 
                     sec_root = ET.fromstring(section_xml_content)
                     first_para = sec_root.find('.//hp:p', ns)
                     if first_para is not None:
                         first_run = first_para.find('hp:run', ns)
                         if first_run is not None:
-                             extracted_nodes = []
-                             for child in first_run:
-                                 tag = child.tag
-                                 if tag.endswith('secPr') or tag.endswith('ctrl'):
-                                     extracted_nodes.append(ET.tostring(child, encoding='unicode'))
-                             if extracted_nodes:
-                                 page_setup_xml = "".join(extracted_nodes)
+                            extracted_nodes = []
+                            for child in first_run:
+                                tag = child.tag
+                                if tag.endswith('secPr') or tag.endswith('ctrl'):
+                                    extracted_nodes.append(ET.tostring(child, encoding='unicode'))
+                            if extracted_nodes:
+                                page_setup_xml = "".join(extracted_nodes)
                 except Exception as e:
                     logger.warning("Failed to extract Page Setup: %s", e)
+
+        return header_xml_content, section_xml_content, page_setup_xml, ref_doc_bytes
+
+    @staticmethod
+    def _write_hwpx_output(output_path, ref_doc_bytes, xml_body, new_header_xml,
+                           images, title, input_path):
+        """Write the final HWPX ZIP file.
+
+        Args:
+            output_path: Output HWPX file path
+            ref_doc_bytes: Raw bytes of the reference template
+            xml_body: Converted XML body content
+            new_header_xml: Modified header XML (or None to use original)
+            images: List of image metadata dicts
+            title: Document title (or None)
+            input_path: Original input file path (for image resolution)
+        """
+        # Prepare Input Zip for reading images if needed (for DOCX)
+        input_zip = None
+        if zipfile.is_zipfile(input_path):
+            input_zip = zipfile.ZipFile(input_path, 'r')
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(ref_doc_bytes), 'r') as ref_zip:
+                with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as out_zip:
+                    # Embed images
+                    MarkdownToHwpx._embed_images(out_zip, images, input_path, input_zip)
+
+                    # Copy/Modify Files from template
+                    for item in ref_zip.infolist():
+                        fname = item.filename
+
+                        if fname == "Contents/section0.xml":
+                            MarkdownToHwpx._write_section0(out_zip, ref_zip, fname, xml_body)
+                        elif fname == "Contents/header.xml":
+                            if new_header_xml:
+                                out_zip.writestr(fname, new_header_xml)
+                            else:
+                                out_zip.writestr(item, ref_zip.read(fname))
+                        elif fname == "Contents/content.hpf":
+                            MarkdownToHwpx._write_manifest(out_zip, ref_zip, fname, images, title)
+                        else:
+                            out_zip.writestr(item, ref_zip.read(fname))
+        except Exception as e:
+            logger.error("HWPX creation failed: %s", e, exc_info=True)
+            raise
+        finally:
+            if input_zip:
+                input_zip.close()
+
+    @staticmethod
+    def _embed_images(out_zip, images, input_path, input_zip):
+        """Embed images into the output HWPX.
+
+        Args:
+            out_zip: Output ZipFile object
+            images: List of image metadata dicts
+            input_path: Original input file path
+            input_zip: ZipFile of input (if DOCX) or None
+        """
+        for img in images:
+            img_path = img['path']
+            img_id = img['id']
+            ext = img['ext']
+            bindata_name = f"BinData/{img_id}.{ext}"
+
+            embedded = False
+
+            # Candidates for image source
+            candidates_to_check = []
+
+            # 1. As-is (CWD or absolute)
+            candidates_to_check.append(img_path)
+
+            # 2. Relative to Input File (if local file)
+            if not zipfile.is_zipfile(input_path):
+                input_dir = os.path.dirname(os.path.abspath(input_path))
+                candidates_to_check.append(os.path.join(input_dir, img_path))
+
+            # Try Local File Candidates
+            for cand_path in candidates_to_check:
+                if os.path.exists(cand_path):
+                    out_zip.write(cand_path, bindata_name)
+                    embedded = True
+                    break
+
+            if embedded:
+                continue
+
+            # 3. Try extracting from Input DOCX (In-Memory)
+            zip_candidates = []
+            if input_zip is not None:
+                zip_candidates = [
+                    img_path,
+                    f"word/{img_path}",
+                    img_path.replace("media/", "word/media/")
+                ]
+
+                for cand in zip_candidates:
+                    if cand in input_zip.namelist():
+                        image_data = input_zip.read(cand)
+                        out_zip.writestr(bindata_name, image_data)
+                        embedded = True
+                        break
+
+            if not embedded:
+                searched = candidates_to_check
+                if input_zip is not None:
+                    searched += zip_candidates
+                logger.warning("Image not found: %s. Searched: %s", img_path, searched)
+
+    @staticmethod
+    def _write_section0(out_zip, ref_zip, fname, xml_body):
+        """Write the section0.xml file with converted body.
+
+        Args:
+            out_zip: Output ZipFile object
+            ref_zip: Reference template ZipFile object
+            fname: Filename (Contents/section0.xml)
+            xml_body: Converted XML body content
+        """
+        original_xml = ref_zip.read(fname).decode('utf-8')
+
+        # Replace body
+        sec_start = original_xml.find('<hs:sec')
+        tag_close = original_xml.find('>', sec_start)
+        prefix = original_xml[:tag_close+1]
+
+        # Ensure Namespaces
+        if 'xmlns:hc=' not in prefix:
+            prefix = prefix[:-1] + ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+        if 'xmlns:hp=' not in prefix:
+            prefix = prefix[:-1] + ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">'
+
+        sec_end = original_xml.rfind('</hs:sec>')
+        suffix = original_xml[sec_end:] if sec_end != -1 else ""
+
+        out_zip.writestr(fname, prefix + "\n" + xml_body + "\n" + suffix)
+
+    @staticmethod
+    def _write_manifest(out_zip, ref_zip, fname, images, title):
+        """Write the content.hpf manifest file.
+
+        Args:
+            out_zip: Output ZipFile object
+            ref_zip: Reference template ZipFile object
+            fname: Filename (Contents/content.hpf)
+            images: List of image metadata dicts
+            title: Document title (or None)
+        """
+        hpf_xml = ref_zip.read(fname).decode('utf-8')
+
+        # 1. Update Title if exists
+        if title:
+            hpf_xml = re.sub(r'<opf:title>.*?</opf:title>', f'<opf:title>{title}</opf:title>', hpf_xml)
+
+        # 2. Update Images
+        if images:
+            new_items = []
+            for img in images:
+                i_id = img['id']
+                i_ext = img['ext']
+                mime = "image/png"
+                if i_ext == "jpg":
+                    mime = "image/jpeg"
+                elif i_ext == "gif":
+                    mime = "image/gif"
+                item_str = f'<opf:item id="{i_id}" href="BinData/{i_id}.{i_ext}" media-type="{mime}" isEmbeded="1"/>'
+                new_items.append(item_str)
+
+            insert_pos = hpf_xml.find("</opf:manifest>")
+            if insert_pos != -1:
+                hpf_xml = hpf_xml[:insert_pos] + "\n".join(new_items) + "\n" + hpf_xml[insert_pos:]
+
+        out_zip.writestr(fname, hpf_xml)
+
+    @staticmethod
+    def convert_to_hwpx(input_path, output_path, reference_path, json_ast=None, config=None):
+        """
+        Convert Markdown to HWPX.
+
+        Args:
+            input_path: Original input file path (for image resolution)
+            output_path: Output HWPX file path
+            reference_path: Reference HWPX for styles
+            json_ast: Pre-parsed Pandoc-like AST dict (from MarkoToPandocAdapter)
+            config: Optional ConversionConfig instance
+        """
+        if config is None:
+            config = DEFAULT_CONFIG
+
+        # 1. Validate inputs
+        MarkdownToHwpx._validate_inputs(input_path, reference_path, json_ast, config)
+
+        # 2. Read Reference (Header & Section0)
+        header_xml_content, section_xml_content, page_setup_xml, ref_doc_bytes = \
+            MarkdownToHwpx._read_template(reference_path)
 
         # 3. Convert Logic (pass section_xml_content for placeholder detection)
         converter = MarkdownToHwpx(json_ast, header_xml_content, section_xml_content, input_path)
         xml_body, new_header_xml = converter.convert(page_setup_xml=page_setup_xml)
 
         # 4. Write Output
-        # Prepare Input Zip for reading images if needed (for DOCX)
-        input_zip = None
-        if zipfile.is_zipfile(input_path):
-             input_zip = zipfile.ZipFile(input_path, 'r')
-
-        try:
-            with zipfile.ZipFile(io.BytesIO(ref_doc_bytes), 'r') as ref_zip:
-                with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as out_zip:
-                    # Images
-                    for img in converter.images:
-                        img_path = img['path'] # e.g. media/image1.png
-                        img_id = img['id']
-                        ext = img['ext']
-                        bindata_name = f"BinData/{img_id}.{ext}"
-
-                        embedded = False
-
-                        # Candidates for image source
-                        candidates_to_check = []
-
-                        # 1. As-is (CWD or absolute)
-                        candidates_to_check.append(img_path)
-
-                        # 2. Relative to Input File (if local file)
-                        # e.g. input="docs/post.md", img="pic.png" -> "docs/pic.png"
-                        if not zipfile.is_zipfile(input_path): # If input is zip (docx), we rely on zip extraction mainly
-                             input_dir = os.path.dirname(os.path.abspath(input_path))
-                             candidates_to_check.append(os.path.join(input_dir, img_path))
-
-                        # Try Local File Candidates
-                        for cand_path in candidates_to_check:
-                             if os.path.exists(cand_path):
-                                  out_zip.write(cand_path, bindata_name)
-                                  embedded = True
-                                  break
-
-                        if embedded:
-                             continue # Skip to next image
-
-                        # 3. Try extracting from Input DOCX (In-Memory)
-                        if input_zip is not None:
-                            # Pandoc AST: media/image1.png
-                            # DOCX Structure: word/media/image1.png
-                            # We need to guess the path in zip
-
-                            # Common mapping: media/xxx -> word/media/xxx
-                            zip_candidates = [
-                                img_path,
-                                f"word/{img_path}",
-                                img_path.replace("media/", "word/media/")
-                            ]
-
-                            for cand in zip_candidates:
-                                if cand in input_zip.namelist():
-                                    image_data = input_zip.read(cand)
-                                    out_zip.writestr(bindata_name, image_data)
-                                    embedded = True
-                                    # logger.debug("Extracted into HWPX: %s -> %s", cand, bindata_name)
-                                    break
-
-                        if not embedded:
-                             searched = candidates_to_check
-                             if input_zip is not None:
-                                 searched += zip_candidates
-                             logger.warning("Image not found: %s. Searched: %s", img_path, searched)
-
-
-                    # Copy/Modify Files
-                    for item in ref_zip.infolist():
-                        fname = item.filename
-
-                        if fname == "Contents/section0.xml":
-                            original_xml = ref_zip.read(fname).decode('utf-8')
-
-                            # Replace body
-                            sec_start = original_xml.find('<hs:sec')
-                            tag_close = original_xml.find('>', sec_start)
-                            prefix = original_xml[:tag_close+1]
-
-                            # Ensure Namespaces
-                            if 'xmlns:hc=' not in prefix:
-                                 prefix = prefix[:-1] + ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
-                            if 'xmlns:hp=' not in prefix:
-                                 prefix = prefix[:-1] + ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">'
-
-                            sec_end = original_xml.rfind('</hs:sec>')
-                            suffix = original_xml[sec_end:] if sec_end != -1 else ""
-
-                            out_zip.writestr(fname, prefix + "\n" + xml_body + "\n" + suffix)
-
-                        elif fname == "Contents/header.xml":
-                            if new_header_xml:
-                                out_zip.writestr(fname, new_header_xml)
-                            else:
-                                out_zip.writestr(item, ref_zip.read(fname))
-
-                        elif fname == "Contents/content.hpf":
-                            # Manifest Update
-                            hpf_xml = ref_zip.read(fname).decode('utf-8')
-
-                            # 1. Update Title if exists
-                            if converter.title:
-                                # regex replace <opf:title>...</opf:title>
-                                import re
-                                hpf_xml = re.sub(r'<opf:title>.*?</opf:title>', f'<opf:title>{converter.title}</opf:title>', hpf_xml)
-
-                            # 2. Update Images
-                            if converter.images:
-                                new_items = []
-                                for img in converter.images:
-                                    i_id = img['id']
-                                    i_ext = img['ext']
-                                    mime = "image/png"
-                                    if i_ext == "jpg": mime = "image/jpeg"
-                                    elif i_ext == "gif": mime = "image/gif"
-                                    item_str = f'<opf:item id="{i_id}" href="BinData/{i_id}.{i_ext}" media-type="{mime}" isEmbeded="1"/>'
-                                    new_items.append(item_str)
-
-                                insert_pos = hpf_xml.find("</opf:manifest>")
-                                if insert_pos != -1:
-                                    hpf_xml = hpf_xml[:insert_pos] + "\n".join(new_items) + "\n" + hpf_xml[insert_pos:]
-
-                            out_zip.writestr(fname, hpf_xml)
-                        else:
-                            out_zip.writestr(item, ref_zip.read(fname))
-        except Exception as e:
-             logger.error("HWPX creation failed: %s", e, exc_info=True)
-             raise
-        finally:
-             if input_zip:
-                 input_zip.close()
+        MarkdownToHwpx._write_hwpx_output(
+            output_path, ref_doc_bytes, xml_body, new_header_xml,
+            converter.images, converter.title, input_path
+        )
 
         logger.info("Successfully created %s", output_path)
 
@@ -898,19 +979,7 @@ class MarkdownToHwpx:
         self._add_elem(run, NS_PARA, 't', text=text)
         return run
 
-    # --- Legacy String-Based Methods (for backward compatibility during refactoring) ---
-
-    def _create_para_start(self, style_id=0, para_pr_id=1, column_break=0, merged=0):
-        """Create paragraph opening tag (legacy string method)."""
-        return self._elem_to_str(self._create_para_elem(style_id, para_pr_id, column_break, merged)).replace('/>', '>')
-
-    def _create_run_start(self, char_pr_id=0):
-        """Create run opening tag (legacy string method)."""
-        return self._elem_to_str(self._create_run_elem(char_pr_id)).replace('/>', '>')
-
-    def _create_text_run(self, text, char_pr_id=0):
-        """Create text run as string (legacy string method)."""
-        return self._elem_to_str(self._create_text_run_elem(text, char_pr_id))
+    # --- Block Handlers ---
 
     def _handle_header(self, content):
         level = content[0]
@@ -1641,20 +1710,16 @@ class MarkdownToHwpx:
 
             elif i_type == 'Note':
                 note_blocks = i_content
-                # Use legacy method for now
-                note_xml = self._create_footnote(note_blocks)
-                for elem in ET.fromstring(f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{note_xml}</root>'):
-                    parent_elem.append(elem)
+                footnote_elem = self._create_footnote_elem(note_blocks)
+                parent_elem.append(footnote_elem)
 
             elif i_type == 'Code':
                 run = self._create_text_run_elem(i_content[1], char_pr_id=get_current_id())
                 parent_elem.append(run)
 
             elif i_type == 'Image':
-                # Use legacy method for now
-                img_xml = self._handle_image(i_content, char_pr_id=get_current_id())
-                for elem in ET.fromstring(f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{img_xml}</root>'):
-                    parent_elem.append(elem)
+                img_elem = self._handle_image_elem(i_content, char_pr_id=get_current_id())
+                parent_elem.append(img_elem)
 
             elif i_type == 'SoftBreak':
                 run = self._create_text_run_elem(" ", char_pr_id=get_current_id())
@@ -1909,10 +1974,6 @@ class MarkdownToHwpx:
 
         return run
 
-    def _handle_image(self, content, char_pr_id=0):
-        """Handle image inline (legacy wrapper)."""
-        return self._elem_to_str(self._handle_image_elem(content, char_pr_id))
-
     def _create_field_begin_elem(self, url):
         """Create field begin element for hyperlink (ElementTree version)."""
         fid = str(int(time.time() * 1000) % 100000000)
@@ -1954,14 +2015,6 @@ class MarkdownToHwpx:
         ctrl = self._add_elem(run, NS_PARA, 'ctrl')
         self._add_elem(ctrl, NS_PARA, 'fieldEnd', {'beginIDRef': fid, 'fieldid': fid})
         return run
-
-    def _create_field_begin(self, url):
-        """Create field begin as string (legacy wrapper)."""
-        return self._elem_to_str(self._create_field_begin_elem(url))
-
-    def _create_field_end(self):
-        """Create field end as string (legacy wrapper)."""
-        return self._elem_to_str(self._create_field_end_elem())
 
     def _create_footnote_elem(self, blocks):
         """Create footnote element (ElementTree version)."""
@@ -2005,10 +2058,6 @@ class MarkdownToHwpx:
                 sublist.append(elem)
 
         return run
-
-    def _create_footnote(self, blocks):
-        """Create footnote as string (legacy wrapper)."""
-        return self._elem_to_str(self._create_footnote_elem(blocks))
 
     def _get_char_pr_id(self, base_id, active_formats):
         # 0. If no format updates, return base_id
