@@ -639,13 +639,19 @@ class MarkdownToHwpx:
             section_root = ET.fromstring(self.section_xml_content)
             placeholders, cell_styles, list_styles = self._find_placeholders(section_root)
 
-            # Store text style placeholders
+            # Store text style placeholders (including mode, prefix, table, styleIDRef)
             for name, info in placeholders.items():
                 self.placeholder_styles[name] = {
                     'charPrIDRef': info['charPrIDRef'],
                     'paraPrIDRef': info['paraPrIDRef'],
+                    'styleIDRef': info.get('styleIDRef', '0'),
+                    'prefix': info.get('prefix'),
+                    'table': info.get('table'),
+                    'mode': info.get('mode', 'plain'),
                 }
-                logger.debug("Found placeholder {{%s}}: charPr=%s, paraPr=%s", name, info['charPrIDRef'], info['paraPrIDRef'])
+                logger.debug("Found placeholder {{%s}}: charPr=%s, paraPr=%s, style=%s, mode=%s",
+                           name, info['charPrIDRef'], info['paraPrIDRef'],
+                           info.get('styleIDRef'), info.get('mode'))
 
             # Store cell style placeholders
             for cell_key, info in cell_styles.items():
@@ -673,7 +679,7 @@ class MarkdownToHwpx:
 
         Returns:
             tuple of (text_placeholders, cell_styles, list_styles)
-            - text_placeholders: dict[name] -> {charPrIDRef, paraPrIDRef}
+            - text_placeholders: dict[name] -> {charPrIDRef, paraPrIDRef, styleIDRef, prefix, table, mode}
             - cell_styles: dict[cell_key] -> {borderFillIDRef, charPrIDRef, paraPrIDRef, cellMargin, borderFill}
             - list_styles: dict[(list_type, level)] -> {charPrIDRef, paraPrIDRef}
         """
@@ -684,24 +690,49 @@ class MarkdownToHwpx:
         placeholder_pattern = re.compile(r'\{\{(\w+)\}\}')
         cell_pattern = re.compile(r'\{\{CELL_(\w+)\}\}')
         list_pattern = re.compile(r'\{\{LIST_(BULLET|ORDERED)_(\d+)\}\}')
+        header_pattern = re.compile(r'\{\{(H[1-9])\}\}')
 
-        # Find cell placeholders in tables
+        # Find cell placeholders and header placeholders in tables
         for tbl in section_root.findall('.//hp:tbl', self.namespaces):
             for tc in tbl.findall('.//hp:tc', self.namespaces):
                 # Find placeholder text in cell
                 for sublist in tc.findall('.//hp:subList', self.namespaces):
                     for para in sublist.findall('.//hp:p', self.namespaces):
+                        para_pr_id = para.get('paraPrIDRef', '0')
+                        style_id = para.get('styleIDRef', '0')
+
                         for run in para.findall('hp:run', self.namespaces):
+                            char_pr_id = run.get('charPrIDRef', '0')
+
                             for text_elem in run.findall('hp:t', self.namespaces):
                                 if text_elem.text:
+                                    # Check for cell placeholder
                                     cell_match = cell_pattern.search(text_elem.text)
                                     if cell_match:
                                         cell_key = cell_match.group(1).upper()  # e.g., HEADER_LEFT
                                         cell_styles[cell_key] = self._extract_cell_attributes(tc, para, run)
+                                        continue
+
+                                    # Check for header placeholder in table
+                                    header_match = header_pattern.search(text_elem.text)
+                                    if header_match:
+                                        header_name = header_match.group(1).upper()
+                                        full_text = text_elem.text
+                                        prefix = full_text[:header_match.start()]
+
+                                        placeholders[header_name] = {
+                                            'charPrIDRef': char_pr_id,
+                                            'paraPrIDRef': para_pr_id,
+                                            'styleIDRef': style_id,
+                                            'prefix': prefix if prefix else None,
+                                            'table': tbl,  # Store entire table element
+                                            'mode': 'table',
+                                        }
 
         # Find text and list placeholders in paragraphs (outside tables)
         for para in section_root.findall('.//hp:p', self.namespaces):
             para_pr_id = para.get('paraPrIDRef', '0')
+            style_id = para.get('styleIDRef', '0')
 
             # Find all runs in this paragraph
             for run in para.findall('hp:run', self.namespaces):
@@ -736,13 +767,45 @@ class MarkdownToHwpx:
                         if text_elem.text.startswith('{{CELL_'):
                             continue
 
-                        # Check for general placeholder
+                        # Check for header placeholder (outside tables)
+                        header_match = header_pattern.search(text_elem.text)
+                        if header_match:
+                            header_name = header_match.group(1).upper()
+                            # Only add if not already found in table
+                            if header_name not in placeholders:
+                                full_text = text_elem.text
+                                prefix = full_text[:header_match.start()]
+
+                                placeholders[header_name] = {
+                                    'charPrIDRef': char_pr_id,
+                                    'paraPrIDRef': para_pr_id,
+                                    'styleIDRef': style_id,
+                                    'prefix': prefix if prefix else None,
+                                    'table': None,
+                                    'mode': 'prefix' if prefix else 'plain',
+                                }
+                            continue
+
+                        # Check for general placeholder (non-header, non-list)
                         match = placeholder_pattern.search(text_elem.text)
                         if match:
                             placeholder_name = match.group(1).upper()
+                            # Skip if already handled as header or list
+                            if placeholder_name.startswith('H') and placeholder_name[1:].isdigit():
+                                continue
+                            if placeholder_name.startswith('LIST_'):
+                                continue
+
+                            full_text = text_elem.text
+                            prefix = full_text[:match.start()]
+
                             placeholders[placeholder_name] = {
                                 'charPrIDRef': char_pr_id,
                                 'paraPrIDRef': para_pr_id,
+                                'styleIDRef': style_id,
+                                'prefix': prefix if prefix else None,
+                                'table': None,
+                                'mode': 'prefix' if prefix else 'plain',
                             }
 
         return placeholders, cell_styles, list_styles
@@ -1034,13 +1097,17 @@ class MarkdownToHwpx:
         placeholder_name = f'H{level}'
         if placeholder_name in self.placeholder_styles:
             props = self.placeholder_styles[placeholder_name]
-            char_pr_id = props['charPrIDRef']
-            para_pr_id = props['paraPrIDRef']
-            style_id = self.normal_style_id
+            mode = props.get('mode', 'plain')
 
-            para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
-            self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
-            return self._elem_to_str(para)
+            if mode == 'table':
+                # Header is inside a table in template - copy table structure
+                return self._handle_header_in_table(inlines, props, column_break_val)
+            elif mode == 'prefix':
+                # Header has prefix text - prepend prefix
+                return self._handle_header_with_prefix(inlines, props, column_break_val)
+            else:
+                # Plain header - just use styleIDRef, paraPrIDRef, charPrIDRef
+                return self._handle_header_plain(inlines, props, column_break_val)
 
         # Fallback to existing style-based logic
         hwpx_level = level - 1
@@ -1066,6 +1133,133 @@ class MarkdownToHwpx:
 
         para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
         self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
+        return self._elem_to_str(para)
+
+    def _handle_header_in_table(self, inlines, props, column_break=0):
+        """Handle header that's defined inside a table in template.
+
+        Copies the entire table structure and replaces the placeholder
+        text with the actual header content. Applies styleIDRef,
+        paraPrIDRef, and charPrIDRef from template.
+
+        The table is wrapped in a paragraph with a run so that secPr
+        injection works correctly when this is the first element.
+
+        Args:
+            inlines: Inline content for the header
+            props: Placeholder properties dict with table, charPrIDRef, paraPrIDRef, styleIDRef
+            column_break: Column break value (0 or 1)
+
+        Returns:
+            XML string of the paragraph containing the table with header content
+        """
+        table_elem = copy.deepcopy(props['table'])
+
+        char_pr_id = int(props['charPrIDRef'])
+        para_pr_id = int(props['paraPrIDRef'])
+        style_id = int(props.get('styleIDRef', self.normal_style_id))
+
+        # Remove template-specific elements that shouldn't be in output
+        # (hp:secPr, hp:linesegarray, hp:ctrl, hp:label)
+        for elem_to_remove in table_elem.findall('.//hp:secPr', self.namespaces):
+            parent = self._find_parent(table_elem, elem_to_remove)
+            if parent is not None:
+                parent.remove(elem_to_remove)
+
+        for elem_to_remove in table_elem.findall('.//hp:linesegarray', self.namespaces):
+            parent = self._find_parent(table_elem, elem_to_remove)
+            if parent is not None:
+                parent.remove(elem_to_remove)
+
+        for elem_to_remove in table_elem.findall('.//hp:ctrl', self.namespaces):
+            parent = self._find_parent(table_elem, elem_to_remove)
+            if parent is not None:
+                parent.remove(elem_to_remove)
+
+        for elem_to_remove in table_elem.findall('hp:label', self.namespaces):
+            table_elem.remove(elem_to_remove)
+
+        # Find the cell containing the placeholder and replace with header content
+        header_pattern = re.compile(r'\{\{H[1-9]\}\}')
+        for para in table_elem.findall('.//hp:p', self.namespaces):
+            for run in para.findall('hp:run', self.namespaces):
+                for text_elem in run.findall('hp:t', self.namespaces):
+                    if text_elem.text and header_pattern.search(text_elem.text):
+                        # Update paragraph attributes
+                        para.set('paraPrIDRef', str(para_pr_id))
+                        para.set('styleIDRef', str(style_id))
+                        # Update run attributes
+                        run.set('charPrIDRef', str(char_pr_id))
+                        # Replace placeholder with header text
+                        header_text = self._get_plain_text(inlines)
+                        text_elem.text = header_pattern.sub(header_text, text_elem.text)
+
+        # Wrap table in a paragraph with run so secPr injection works
+        # when this is the first element in the document
+        wrapper_para = self._create_para_elem(
+            style_id=self.normal_style_id,
+            para_pr_id=self.normal_para_pr_id,
+            column_break=column_break
+        )
+        wrapper_run = self._create_run_elem(char_pr_id=0)
+        wrapper_run.append(table_elem)
+        # Add empty text element after table
+        self._add_elem(wrapper_run, NS_PARA, 't')
+        wrapper_para.append(wrapper_run)
+
+        return self._elem_to_str(wrapper_para)
+
+    def _find_parent(self, root, child):
+        """Find the parent element of a child in an ElementTree."""
+        for parent in root.iter():
+            if child in parent:
+                return parent
+        return None
+
+    def _handle_header_with_prefix(self, inlines, props, column_break=0):
+        """Handle header with prefix text (like 'ㅁ {{H3}}').
+
+        Args:
+            inlines: Inline content for the header
+            props: Placeholder properties dict with prefix, charPrIDRef, paraPrIDRef, styleIDRef
+            column_break: Column break value (0 or 1)
+
+        Returns:
+            XML string of the paragraph with prefix + header content
+        """
+        char_pr_id = int(props['charPrIDRef'])
+        para_pr_id = int(props['paraPrIDRef'])
+        style_id = int(props.get('styleIDRef', self.normal_style_id))
+        prefix = props.get('prefix', '')
+
+        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break)
+
+        # Add prefix as first run
+        if prefix:
+            prefix_run = self._create_text_run_elem(prefix, char_pr_id)
+            para.append(prefix_run)
+
+        # Add header content
+        self._process_inlines_to_elems(inlines, para, base_char_pr_id=char_pr_id)
+        return self._elem_to_str(para)
+
+    def _handle_header_plain(self, inlines, props, column_break=0):
+        """Handle plain header placeholder.
+
+        Args:
+            inlines: Inline content for the header
+            props: Placeholder properties dict with charPrIDRef, paraPrIDRef, styleIDRef
+            column_break: Column break value (0 or 1)
+
+        Returns:
+            XML string of the paragraph
+        """
+        char_pr_id = int(props['charPrIDRef'])
+        para_pr_id = int(props['paraPrIDRef'])
+        style_id = int(props.get('styleIDRef', self.normal_style_id))
+
+        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break)
+        self._process_inlines_to_elems(inlines, para, base_char_pr_id=char_pr_id)
         return self._elem_to_str(para)
 
     def _handle_text_block(self, content, placeholder_name='BODY'):
