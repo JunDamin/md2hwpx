@@ -58,7 +58,7 @@ def main():
     parser.add_argument("input_file", help="Input Markdown file (.md, .markdown)")
     parser.add_argument("-o", "--output", required=True,
                         help="Output file (.hwpx, .json for debug)")
-    parser.add_argument("--reference-doc", required=False, default=None,
+    parser.add_argument("-r", "--reference-doc", required=False, default=None,
                         help="Reference HWPX for styles and page setup (default: built-in blank.hwpx)")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--verbose", action="store_true", default=False,
