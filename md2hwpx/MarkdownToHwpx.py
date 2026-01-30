@@ -656,6 +656,7 @@ class MarkdownToHwpx:
                     'paraPrIDRef': info['paraPrIDRef'],
                     'styleIDRef': info.get('styleIDRef', '0'),
                     'prefix': info.get('prefix'),
+                    'prefixCharPrIDRef': info.get('prefixCharPrIDRef'),
                     'table': info.get('table'),
                     'mode': info.get('mode', 'plain'),
                 }
@@ -755,6 +756,36 @@ class MarkdownToHwpx:
                         self.template_table_width = int(width_str)
                         logger.debug("Extracted template table width: %d", self.template_table_width)
 
+    def _collect_preceding_runs_prefix(self, para, current_run):
+        """Collect prefix text and charPrIDRef from runs preceding current_run.
+
+        When a placeholder like {{H3}} is in a separate run from its prefix
+        (e.g., run1: "□ ", run2: "{{H3}}"), this collects text from all
+        preceding runs as the prefix.
+
+        Args:
+            para: The paragraph element containing the runs
+            current_run: The run element containing the placeholder
+
+        Returns:
+            tuple of (prefix_text, prefix_char_pr_id) where prefix_text is the
+            concatenated text from preceding runs (or None if empty), and
+            prefix_char_pr_id is the charPrIDRef of the first preceding run
+            with text (or None if no preceding runs with text)
+        """
+        prefix_parts = []
+        prefix_char_pr_id = None
+        for r in para.findall('hp:run', self.namespaces):
+            if r is current_run:
+                break
+            for t in r.findall('hp:t', self.namespaces):
+                if t.text:
+                    prefix_parts.append(t.text)
+                    if prefix_char_pr_id is None:
+                        prefix_char_pr_id = r.get('charPrIDRef', '0')
+        prefix_text = ''.join(prefix_parts) if prefix_parts else None
+        return prefix_text, prefix_char_pr_id
+
     def _find_paragraph_placeholders(self, section_root, placeholders, list_styles):
         """Find header, list, and general placeholders in paragraphs.
 
@@ -776,6 +807,12 @@ class MarkdownToHwpx:
                         level = int(list_match.group(2))
                         full_text = text_elem.text
                         prefix = full_text[:list_match.start()]
+
+                        # Also check preceding runs for prefix text
+                        if not prefix:
+                            preceding_prefix, _ = self._collect_preceding_runs_prefix(para, run)
+                            if preceding_prefix:
+                                prefix = preceding_prefix
 
                         styles = self._extract_style_ids(para, run)
                         has_numbering, num_pr_id = self._check_para_pr_has_numbering(styles['paraPrIDRef'])
@@ -802,10 +839,16 @@ class MarkdownToHwpx:
                             full_text = text_elem.text
                             prefix = full_text[:header_match.start()]
 
+                            # Check preceding runs for prefix in separate run
+                            preceding_prefix, prefix_char_pr_id = self._collect_preceding_runs_prefix(para, run)
+                            if not prefix and preceding_prefix:
+                                prefix = preceding_prefix
+
                             styles = self._extract_style_ids(para, run)
                             placeholders[header_name] = {
                                 **styles,
                                 'prefix': prefix if prefix else None,
+                                'prefixCharPrIDRef': prefix_char_pr_id,
                                 'table': None,
                                 'mode': 'prefix' if prefix else 'plain',
                             }
@@ -824,10 +867,16 @@ class MarkdownToHwpx:
                         full_text = text_elem.text
                         prefix = full_text[:match.start()]
 
+                        # Check preceding runs for prefix in separate run
+                        preceding_prefix, prefix_char_pr_id = self._collect_preceding_runs_prefix(para, run)
+                        if not prefix and preceding_prefix:
+                            prefix = preceding_prefix
+
                         styles = self._extract_style_ids(para, run)
                         placeholders[placeholder_name] = {
                             **styles,
                             'prefix': prefix if prefix else None,
+                            'prefixCharPrIDRef': prefix_char_pr_id,
                             'table': None,
                             'mode': 'prefix' if prefix else 'plain',
                         }
@@ -1257,12 +1306,13 @@ class MarkdownToHwpx:
 
         Creates a paragraph with the template's styleIDRef, paraPrIDRef, and
         charPrIDRef. If a prefix is specified in props, it's prepended to the
-        header content.
+        header content. When the prefix comes from a separate run in the
+        template, prefixCharPrIDRef preserves its original character style.
 
         Args:
             inlines: Inline content for the header
             props: Placeholder properties dict with charPrIDRef, paraPrIDRef,
-                   styleIDRef, and optional prefix
+                   styleIDRef, optional prefix, and optional prefixCharPrIDRef
             column_break: Column break value (0 or 1)
 
         Returns:
@@ -1277,7 +1327,9 @@ class MarkdownToHwpx:
 
         # Add prefix as first run if present
         if prefix:
-            prefix_run = self._create_text_run_elem(prefix, char_pr_id)
+            prefix_char_pr_id = props.get('prefixCharPrIDRef')
+            prefix_cid = int(prefix_char_pr_id) if prefix_char_pr_id else char_pr_id
+            prefix_run = self._create_text_run_elem(prefix, prefix_cid)
             para.append(prefix_run)
 
         # Add header content

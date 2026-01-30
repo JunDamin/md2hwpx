@@ -230,6 +230,113 @@ class TestConverterPlaceholders:
             assert 'cellMargin' in style, f"Missing cellMargin in {key}"
 
 
+class TestConverterMultiRunPrefix:
+    """Test prefix detection when prefix is in a separate run from the placeholder."""
+
+    def _make_section_xml_with_multi_run_prefix(self):
+        """Create section XML where prefix text is in a separate run from {{H3}}."""
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="10" styleIDRef="5" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="22"><hp:t>\u25a1 </hp:t></hp:run>'
+            '<hp:run charPrIDRef="19"><hp:t>{{H3}}</hp:t></hp:run>'
+            '</hp:p>'
+            '</hs:sec>'
+        )
+
+    def test_multi_run_prefix_detected(self, blank_hwpx_path):
+        """Prefix in a separate run should be detected and stored."""
+        ast = _parse_md("### Test Header")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml_with_multi_run_prefix()
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        assert 'H3' in converter.placeholder_styles
+        h3 = converter.placeholder_styles['H3']
+        assert h3['prefix'] == '\u25a1 '
+        assert h3['mode'] == 'prefix'
+        assert h3['charPrIDRef'] == '19'
+        assert h3['prefixCharPrIDRef'] == '22'
+
+    def test_multi_run_prefix_rendered_in_output(self, blank_hwpx_path):
+        """Header with multi-run prefix should include prefix text in output XML."""
+        ast = _parse_md("### Test Header")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml_with_multi_run_prefix()
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        # The prefix symbol should appear in the output
+        assert '\u25a1 ' in section_output
+        assert 'Test' in section_output
+        assert 'Header' in section_output
+
+    def test_multi_run_prefix_uses_correct_char_pr_id(self, blank_hwpx_path):
+        """Prefix run should use the prefix's own charPrIDRef, not the header's."""
+        ast = _parse_md("### Test Header")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml_with_multi_run_prefix()
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        # The prefix run should have charPrIDRef="22"
+        assert 'charPrIDRef="22"' in section_output
+        # The header content run should have charPrIDRef="19"
+        assert 'charPrIDRef="19"' in section_output
+
+    def test_single_run_prefix_still_works(self, blank_hwpx_path):
+        """Prefix within the same run as placeholder should still work."""
+        section_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="10" styleIDRef="5" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="19"><hp:t>\u25a1 {{H3}}</hp:t></hp:run>'
+            '</hp:p>'
+            '</hs:sec>'
+        )
+        ast = _parse_md("### Test")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        h3 = converter.placeholder_styles['H3']
+        assert h3['prefix'] == '\u25a1 '
+        assert h3['mode'] == 'prefix'
+        assert h3['prefixCharPrIDRef'] is None  # No separate run, no prefixCharPrIDRef
+
+
 class TestStaticConvertToHwpx:
     """Test the static convert_to_hwpx method."""
 
