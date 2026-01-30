@@ -17,7 +17,7 @@ from .MarkdownToHwpx import MarkdownToHwpx
 from .exceptions import HwpxError, SecurityError
 from .config import DEFAULT_CONFIG
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
 
 logger = logging.getLogger('md2hwpx')
 
