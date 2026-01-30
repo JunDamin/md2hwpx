@@ -3,3 +3,7 @@ __pycache__
 samples
 blank*
 output*
+tests/gov_output_extracted
+tests/ExportBlock-70f882fd-4d80-4add-ae90-cc3e9a98135f-Part-1
+templates/gov_template_extracted
+tests/notion.md

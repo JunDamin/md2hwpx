@@ -15,6 +15,7 @@ from .frontmatter_parser import (
 )
 from .config import ConversionConfig, DEFAULT_CONFIG
 from .exceptions import HwpxError, TemplateError, ImageError, StyleError, ConversionError
+from .converter_api import convert_string
 
 __version__ = "0.2.0"
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "ImageError",
     "StyleError",
     "ConversionError",
+    "convert_string",
 ]

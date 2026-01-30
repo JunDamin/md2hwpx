@@ -147,12 +147,13 @@ class MarkdownToHwpx:
             raise ConversionError("json_ast parameter is required")
 
         # Validate file sizes
-        input_size = os.path.getsize(input_path)
-        if input_size > config.MAX_INPUT_FILE_SIZE:
-            raise SecurityError(
-                f"Input file too large: {input_size} bytes "
-                f"(max {config.MAX_INPUT_FILE_SIZE} bytes)"
-            )
+        if input_path is not None:
+            input_size = os.path.getsize(input_path)
+            if input_size > config.MAX_INPUT_FILE_SIZE:
+                raise SecurityError(
+                    f"Input file too large: {input_size} bytes "
+                    f"(max {config.MAX_INPUT_FILE_SIZE} bytes)"
+                )
 
         ref_size = os.path.getsize(reference_path)
         if ref_size > config.MAX_TEMPLATE_FILE_SIZE:
@@ -247,7 +248,7 @@ class MarkdownToHwpx:
         """
         # Prepare Input Zip for reading images if needed (for DOCX)
         input_zip = None
-        if zipfile.is_zipfile(input_path):
+        if input_path and zipfile.is_zipfile(input_path):
             input_zip = zipfile.ZipFile(input_path, 'r')
 
         try:
