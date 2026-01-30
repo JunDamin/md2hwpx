@@ -1,8 +1,22 @@
+from pathlib import Path
+
 from setuptools import setup, find_packages
+
+
+def read_version():
+    version_file = Path(__file__).parent / "md2hwpx" / "__init__.py"
+    for line in version_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("__version__"):
+            return line.split("=", 1)[1].strip().strip('"')
+    raise RuntimeError("Unable to find __version__ in md2hwpx/__init__.py")
+
+
+def read_readme():
+    return Path(__file__).parent.joinpath("README.md").read_text(encoding="utf-8")
 
 setup(
     name="md2hwpx",
-    version="0.2.0",
+    version=read_version(),
     packages=find_packages(),
     include_package_data=True,
     package_data={
@@ -23,9 +37,10 @@ setup(
     project_urls={
         "Source": "https://github.com/msjang/md2hwpx",
         "Tracker": "https://github.com/msjang/md2hwpx/issues",
+        "Fork of": "https://github.com/msjang/pypandoc-hwpx",
     },
     description="Convert Markdown to HWPX (Korean Hancom Office format)",
-    long_description=open("README.md").read(),
+    long_description=read_readme(),
     long_description_content_type="text/markdown",
     license="MIT",
     classifiers=[

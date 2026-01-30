@@ -2,6 +2,8 @@
 
 All notable changes to md2hwpx will be documented in this file.
 
+Forked from pypandoc-hwpx: https://github.com/msjang/pypandoc-hwpx
+
 ## [0.2.0] - 2026-01-29
 
 ### Added
