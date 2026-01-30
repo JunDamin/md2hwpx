@@ -56,6 +56,9 @@ class MarkdownToHwpx:
         # Table cell placeholder styles (12 cell types)
         self.cell_styles = {}
 
+        # Table width from template (extracted from the table containing cell placeholders)
+        self.template_table_width = None
+
         # List placeholder styles (bullet/ordered × levels 1-7)
         self.list_styles = {}
 
@@ -711,6 +714,7 @@ class MarkdownToHwpx:
             cell_styles: Dict to populate with cell placeholders (modified in place)
         """
         for tbl in section_root.findall('.//hp:tbl', self.namespaces):
+            has_cell_placeholder = False
             for tc in tbl.findall('.//hp:tc', self.namespaces):
                 for sublist in tc.findall('.//hp:subList', self.namespaces):
                     for para in sublist.findall('.//hp:p', self.namespaces):
@@ -724,6 +728,7 @@ class MarkdownToHwpx:
                                 if cell_match:
                                     cell_key = cell_match.group(1).upper()
                                     cell_styles[cell_key] = self._extract_cell_attributes(tc, para, run)
+                                    has_cell_placeholder = True
                                     continue
 
                                 # Check for header placeholder in table
@@ -740,6 +745,15 @@ class MarkdownToHwpx:
                                         'table': tbl,
                                         'mode': 'table',
                                     }
+
+            # Extract table width from the table that contains cell placeholders
+            if has_cell_placeholder:
+                sz_elem = tbl.find('hp:sz', self.namespaces)
+                if sz_elem is not None:
+                    width_str = sz_elem.get('width')
+                    if width_str:
+                        self.template_table_width = int(width_str)
+                        logger.debug("Extracted template table width: %d", self.template_table_width)
 
     def _find_paragraph_placeholders(self, section_root, placeholders, list_styles):
         """Find header, list, and general placeholders in paragraphs.
@@ -1675,8 +1689,22 @@ class MarkdownToHwpx:
         col_cnt = len(specs)
 
         # Calculate Widths using config
-        TOTAL_TABLE_WIDTH = self.config.TABLE_WIDTH
-        col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
+        TOTAL_TABLE_WIDTH = self.template_table_width if self.template_table_width else self.config.TABLE_WIDTH
+
+        # Use proportional widths from colspecs if available (from dash counts)
+        has_proportional = any(
+            s[1].get("t") == "ColWidth" for s in specs
+        )
+        if has_proportional:
+            col_widths = []
+            for spec in specs:
+                width_info = spec[1]
+                if width_info.get("t") == "ColWidth":
+                    col_widths.append(int(width_info["c"] * TOTAL_TABLE_WIDTH))
+                else:
+                    col_widths.append(int(TOTAL_TABLE_WIDTH / col_cnt))
+        else:
+            col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
 
         # Generate IDs
         tbl_id = str(int(time.time() * 1000) % 100000000 + random.randint(0, 10000))

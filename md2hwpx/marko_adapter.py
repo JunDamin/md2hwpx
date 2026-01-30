@@ -16,12 +16,17 @@ class MarkoToPandocAdapter:
     # Standard Markdown only supports 1-6, but HWPX supports up to 9
     EXTENDED_HEADER_RE = re.compile(r'^(#{7,9})\s+(.+)$')
 
+    # Regex to match table separator lines (e.g., |---|-----------|---|)
+    TABLE_SEPARATOR_RE = re.compile(r'^\|[\s:]*-')
+
     def __init__(self):
         # Initialize Marko with GFM (tables, strikethrough, etc.) and Footnote support
         # Extensions are loaded by name string
         self.md = Markdown(extensions=['gfm', 'footnote'])
         self.footnotes = {}  # Store footnote definitions from document
         self.extended_headers = {}  # Store extended header placeholders
+        self.table_dash_counts = {}  # Store dash counts per table separator
+        self.table_counter = 0  # Track table index during conversion
 
     def _preprocess_extended_headers(self, markdown_text: str) -> str:
         """
@@ -71,6 +76,51 @@ class MarkoToPandocAdapter:
             "c": [level, ["", [], []], inlines]
         }
 
+    def _preprocess_table_dashes(self, markdown_text):
+        """Extract dash counts from table separator rows before Marko parsing.
+
+        Scans the raw markdown for table separator lines and records
+        the number of dashes in each column. This is used later to
+        calculate proportional column widths.
+
+        Args:
+            markdown_text: Raw markdown string
+        """
+        self.table_dash_counts = {}
+        table_index = 0
+        for line in markdown_text.split('\n'):
+            stripped = line.strip()
+            if not self.TABLE_SEPARATOR_RE.match(stripped):
+                continue
+            cells = [c.strip() for c in stripped.split('|')[1:-1]]
+            if cells and all(re.match(r'^:?-+:?$', c) for c in cells if c):
+                dash_counts = {}
+                for col_idx, cell in enumerate(cells):
+                    if cell:
+                        dash_counts[col_idx] = cell.count('-')
+                self.table_dash_counts[table_index] = dash_counts
+                table_index += 1
+
+    def _get_col_width_info(self, table_index, col_idx):
+        """Get width info dict for a column from stored dash counts.
+
+        Args:
+            table_index: Index of the table (order of appearance)
+            col_idx: Column index within the table
+
+        Returns:
+            Pandoc-compatible width dict:
+            - {"t": "ColWidth", "c": proportion} if dash count available
+            - {"t": "ColWidthDefault"} otherwise
+        """
+        if table_index not in self.table_dash_counts:
+            return {"t": "ColWidthDefault"}
+        col_dashes = self.table_dash_counts[table_index]
+        total_dashes = sum(col_dashes.values())
+        if total_dashes == 0 or col_idx not in col_dashes:
+            return {"t": "ColWidthDefault"}
+        return {"t": "ColWidth", "c": col_dashes[col_idx] / total_dashes}
+
     def parse(self, markdown_text: str) -> dict:
         """
         Parse markdown and return Pandoc-like AST dict.
@@ -81,9 +131,14 @@ class MarkoToPandocAdapter:
         # Reset state for each parse
         self.extended_headers = {}
         self.footnotes = {}
+        self.table_dash_counts = {}
+        self.table_counter = 0
 
         # Preprocess to handle extended headers (7-9)
         processed_text = self._preprocess_extended_headers(markdown_text)
+
+        # Extract table dash counts for proportional column widths
+        self._preprocess_table_dashes(markdown_text)
 
         doc = self.md.parse(processed_text)
 
@@ -271,15 +326,20 @@ class MarkoToPandocAdapter:
         if first_row and first_row.children:
             col_count = len(first_row.children)
 
-        # Column specs (alignment) - extract from first row cells
+        # Column specs (alignment + proportional width from dash counts)
+        table_idx = self.table_counter
+        self.table_counter += 1
+
         specs = []
         if first_row and first_row.children:
-            for cell in first_row.children:
+            for col_idx, cell in enumerate(first_row.children):
                 cell_align = getattr(cell, 'align', None)
                 align_str = self._ALIGN_MAP.get(cell_align, 'AlignDefault')
-                specs.append([align_str, {"t": "ColWidthDefault"}])
+                width_info = self._get_col_width_info(table_idx, col_idx)
+                specs.append([align_str, width_info])
         else:
-            specs = [["AlignDefault", {"t": "ColWidthDefault"}] for _ in range(col_count)]
+            specs = [["AlignDefault", self._get_col_width_info(table_idx, i)]
+                     for i in range(col_count)]
 
         # Convert header
         head_converted = [self._convert_table_row(row) for row in head_rows]
