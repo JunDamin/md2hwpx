@@ -1,10 +1,16 @@
-tests/*.hwpx
-tests/test-long.md
-tests/notion.md
-tests/gov_output_extracted
-tests/ExportBlock-70f882fd-4d80-4add-ae90-cc3e9a98135f-Part-1
-templates/gov_template_extracted
-templates/gov_template.hwpx
+/tests/*.hwpx
+/tests/*.pdf
+/tests/*.json
+/tests/*.html
+/tests/*.md
+/tests/*.docx
+/tests/gov_output_extracted/
+/tests/ExportBlock-70f882fd-4d80-4add-ae90-cc3e9a98135f-Part-1/
+
+/templates/gov_template_extracted/
+/templates/gov_template.hwpx
+
+/.claude/
 
 __pycache__/
 .pytest_cache/
@@ -17,6 +23,6 @@ build/
 dist/
 .venv/
 
-samples/
-blank*
-output*
+/samples/
+/blank*
+/output*
