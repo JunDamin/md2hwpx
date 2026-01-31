@@ -337,6 +337,321 @@ class TestConverterMultiRunPrefix:
         assert h3['prefixCharPrIDRef'] is None  # No separate run, no prefixCharPrIDRef
 
 
+class TestTableHeaderAutoNumbering:
+    """Test auto-incrementing numbering in table-mode headers."""
+
+    TABLE_SECTION_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+        ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+        ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+        '<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="0">'
+        '<hp:tbl id="1" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM"'
+        ' textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"'
+        ' repeatHeader="1" rowCnt="1" colCnt="2" cellSpacing="0" borderFillIDRef="1" noAdjust="0">'
+        '<hp:sz width="40000" widthRelTo="ABSOLUTE" height="2000" heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0"'
+        ' holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP"'
+        ' horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:tr>'
+        '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">'
+        '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER"'
+        ' linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0"'
+        ' hasTextRef="0" hasNumRef="0">'
+        '<hp:p paraPrIDRef="10" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="13"><hp:t>{numbering}</hp:t></hp:run>'
+        '</hp:p>'
+        '</hp:subList>'
+        '<hp:cellAddr colAddr="0" rowAddr="0"/>'
+        '<hp:cellSpan colSpan="1" rowSpan="1"/>'
+        '<hp:cellSz width="5000" height="2000"/>'
+        '</hp:tc>'
+        '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">'
+        '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER"'
+        ' linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0"'
+        ' hasTextRef="0" hasNumRef="0">'
+        '<hp:p paraPrIDRef="10" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="12"><hp:t>{{{{H2}}}}</hp:t></hp:run>'
+        '</hp:p>'
+        '</hp:subList>'
+        '<hp:cellAddr colAddr="1" rowAddr="0"/>'
+        '<hp:cellSpan colSpan="1" rowSpan="1"/>'
+        '<hp:cellSz width="35000" height="2000"/>'
+        '</hp:tc>'
+        '</hp:tr>'
+        '</hp:tbl>'
+        '<hp:t/></hp:run></hp:p>'
+        '</hs:sec>'
+    )
+
+    def _make_section_xml(self, numbering='I'):
+        return self.TABLE_SECTION_XML.format(numbering=numbering)
+
+    def test_numbering_text_detected_from_template(self, blank_hwpx_path):
+        """numberingText should be extracted from the non-placeholder cell."""
+        ast = _parse_md("## First")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=self._make_section_xml('I'),
+        )
+
+        assert 'H2' in converter.placeholder_styles
+        h2 = converter.placeholder_styles['H2']
+        assert h2['mode'] == 'table'
+        assert h2['numberingText'] == 'I'
+
+    def test_roman_numeral_increments(self, blank_hwpx_path):
+        """Multiple H2 headers should produce I, II, III in the numbering cell."""
+        md = "## First\n\nBody\n\n## Second\n\nBody\n\n## Third\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=self._make_section_xml('I'),
+        )
+
+        section_output, _ = converter.convert()
+        assert 'First' in section_output
+        assert 'Second' in section_output
+        assert 'Third' in section_output
+        # Check Roman numerals appear (II and III confirm incrementing)
+        assert '>II<' in section_output
+        assert '>III<' in section_output
+
+    def test_arabic_numeral_increments(self, blank_hwpx_path):
+        """Arabic numbering: 1, 2, 3."""
+        md = "## First\n\nBody\n\n## Second\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=self._make_section_xml('1'),
+        )
+
+        section_output, _ = converter.convert()
+        assert '>2<' in section_output
+
+    def test_korean_numbering_increments(self, blank_hwpx_path):
+        """Korean numbering: 가, 나, 다."""
+        md = "## First\n\nBody\n\n## Second\n\nBody\n\n## Third\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=self._make_section_xml('\uac00'),  # 가
+        )
+
+        section_output, _ = converter.convert()
+        assert '\ub098' in section_output  # 나
+        assert '\ub2e4' in section_output  # 다
+
+    def test_no_numbering_text_no_error(self, blank_hwpx_path):
+        """Table without numbering text should still work (no crash)."""
+        # Use the placeholder-template which has table-mode H1 without numbering text
+        section_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="0">'
+            '<hp:tbl id="1" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM"'
+            ' textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"'
+            ' repeatHeader="1" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="1" noAdjust="0">'
+            '<hp:sz width="40000" widthRelTo="ABSOLUTE" height="2000" heightRelTo="ABSOLUTE" protect="0"/>'
+            '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0"'
+            ' holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP"'
+            ' horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+            '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+            '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+            '<hp:tr>'
+            '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">'
+            '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER"'
+            ' linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0"'
+            ' hasTextRef="0" hasNumRef="0">'
+            '<hp:p paraPrIDRef="10" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="12"><hp:t>{{H2}}</hp:t></hp:run>'
+            '</hp:p>'
+            '</hp:subList>'
+            '<hp:cellAddr colAddr="0" rowAddr="0"/>'
+            '<hp:cellSpan colSpan="1" rowSpan="1"/>'
+            '<hp:cellSz width="40000" height="2000"/>'
+            '</hp:tc>'
+            '</hp:tr>'
+            '</hp:tbl>'
+            '<hp:t/></hp:run></hp:p>'
+            '</hs:sec>'
+        )
+        ast = _parse_md("## Title\n\nBody")
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        assert converter.placeholder_styles['H2']['numberingText'] is None
+        # Should not crash
+        section_output, _ = converter.convert()
+        assert 'Title' in section_output
+
+    def test_format_header_numbering_roman(self, blank_hwpx_path):
+        """Test _format_header_numbering with Roman numerals."""
+        converter = _make_converter("Hello", blank_hwpx_path)
+        assert converter._format_header_numbering('I', 1) == 'I'
+        assert converter._format_header_numbering('I', 2) == 'II'
+        assert converter._format_header_numbering('I', 3) == 'III'
+        assert converter._format_header_numbering('I', 4) == 'IV'
+        assert converter._format_header_numbering('I', 10) == 'X'
+
+    def test_format_header_numbering_roman_lowercase(self, blank_hwpx_path):
+        """Test _format_header_numbering with lowercase Roman numerals."""
+        converter = _make_converter("Hello", blank_hwpx_path)
+        assert converter._format_header_numbering('i', 1) == 'i'
+        assert converter._format_header_numbering('i', 2) == 'ii'
+        assert converter._format_header_numbering('i', 3) == 'iii'
+
+    def test_format_header_numbering_arabic(self, blank_hwpx_path):
+        """Test _format_header_numbering with Arabic numerals."""
+        converter = _make_converter("Hello", blank_hwpx_path)
+        assert converter._format_header_numbering('1', 1) == '1'
+        assert converter._format_header_numbering('1', 2) == '2'
+        assert converter._format_header_numbering('1', 10) == '10'
+
+    def test_format_header_numbering_korean(self, blank_hwpx_path):
+        """Test _format_header_numbering with Korean syllables."""
+        converter = _make_converter("Hello", blank_hwpx_path)
+        assert converter._format_header_numbering('\uac00', 1) == '\uac00'  # 가
+        assert converter._format_header_numbering('\uac00', 2) == '\ub098'  # 나
+        assert converter._format_header_numbering('\uac00', 3) == '\ub2e4'  # 다
+
+    def test_format_header_numbering_fallback(self, blank_hwpx_path):
+        """Unrecognized patterns should be returned as-is."""
+        converter = _make_converter("Hello", blank_hwpx_path)
+        assert converter._format_header_numbering('Section', 2) == 'Section'
+
+    def test_child_counter_resets_on_parent_header(self, blank_hwpx_path):
+        """H3 counter should reset when a new H2 appears.
+
+        ## A  → I
+        ### X → 1
+        ### Y → 2
+        ## B  → II
+        ### Z → 1  (reset, not 3)
+        """
+        def _make_table_xml(placeholder, numbering, tbl_id):
+            return (
+                '<hp:tbl id="{tbl_id}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM"'
+                ' textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"'
+                ' repeatHeader="1" rowCnt="1" colCnt="2" cellSpacing="0" borderFillIDRef="1" noAdjust="0">'
+                '<hp:sz width="40000" widthRelTo="ABSOLUTE" height="2000" heightRelTo="ABSOLUTE" protect="0"/>'
+                '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0"'
+                ' holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP"'
+                ' horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+                '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+                '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+                '<hp:tr>'
+                '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">'
+                '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER"'
+                ' linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0"'
+                ' hasTextRef="0" hasNumRef="0">'
+                '<hp:p paraPrIDRef="10" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                '<hp:run charPrIDRef="13"><hp:t>{numbering}</hp:t></hp:run>'
+                '</hp:p>'
+                '</hp:subList>'
+                '<hp:cellAddr colAddr="0" rowAddr="0"/>'
+                '<hp:cellSpan colSpan="1" rowSpan="1"/>'
+                '<hp:cellSz width="5000" height="2000"/>'
+                '</hp:tc>'
+                '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">'
+                '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER"'
+                ' linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0"'
+                ' hasTextRef="0" hasNumRef="0">'
+                '<hp:p paraPrIDRef="10" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                '<hp:run charPrIDRef="12"><hp:t>{placeholder}</hp:t></hp:run>'
+                '</hp:p>'
+                '</hp:subList>'
+                '<hp:cellAddr colAddr="1" rowAddr="0"/>'
+                '<hp:cellSpan colSpan="1" rowSpan="1"/>'
+                '<hp:cellSz width="35000" height="2000"/>'
+                '</hp:tc>'
+                '</hp:tr>'
+                '</hp:tbl>'
+            ).format(placeholder=placeholder, numbering=numbering, tbl_id=tbl_id)
+
+        h2_table = _make_table_xml('{{H2}}', 'I', '1')
+        h3_table = _make_table_xml('{{H3}}', '1', '2')
+
+        section_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="0">'
+            + h2_table +
+            '<hp:t/></hp:run></hp:p>'
+            '<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="0">'
+            + h3_table +
+            '<hp:t/></hp:run></hp:p>'
+            '</hs:sec>'
+        )
+
+        md = (
+            "## Chapter A\n\n"
+            "### Section X\n\n"
+            "### Section Y\n\n"
+            "## Chapter B\n\n"
+            "### Section Z\n\n"
+        )
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+
+        # H2 should increment: I, II
+        assert '>I<' in section_output
+        assert '>II<' in section_output
+
+        # H3 under Chapter A: 1, 2
+        # H3 under Chapter B: 1 (reset)
+        # Count occurrences of ">1<" — should appear twice (once per chapter)
+        assert section_output.count('>1<') == 2
+        assert section_output.count('>2<') == 1
+
+
 class TestStaticConvertToHwpx:
     """Test the static convert_to_hwpx method."""
 

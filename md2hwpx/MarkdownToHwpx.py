@@ -62,6 +62,9 @@ class MarkdownToHwpx:
         # List placeholder styles (bullet/ordered × levels 1-7)
         self.list_styles = {}
 
+        # Header counters for table-mode auto-numbering (level -> count)
+        self.header_counters = {}
+
         # XML Tree and CharPr Cache
         self.header_tree = None
         self.header_root = None
@@ -659,6 +662,7 @@ class MarkdownToHwpx:
                     'prefixCharPrIDRef': info.get('prefixCharPrIDRef'),
                     'table': info.get('table'),
                     'mode': info.get('mode', 'plain'),
+                    'numberingText': info.get('numberingText'),
                 }
                 logger.debug("Found placeholder {{%s}}: charPr=%s, paraPr=%s, style=%s, mode=%s",
                            name, info['charPrIDRef'], info['paraPrIDRef'],
@@ -740,11 +744,16 @@ class MarkdownToHwpx:
                                     prefix = full_text[:header_match.start()]
 
                                     styles = self._extract_style_ids(para, run)
+
+                                    # Scan other cells for numbering text
+                                    numbering_text = self._find_table_numbering_text(tbl, text_elem)
+
                                     placeholders[header_name] = {
                                         **styles,
                                         'prefix': prefix if prefix else None,
                                         'table': tbl,
                                         'mode': 'table',
+                                        'numberingText': numbering_text,
                                     }
 
             # Extract table width from the table that contains cell placeholders
@@ -755,6 +764,39 @@ class MarkdownToHwpx:
                     if width_str:
                         self.template_table_width = int(width_str)
                         logger.debug("Extracted template table width: %d", self.template_table_width)
+
+    def _find_table_numbering_text(self, tbl, placeholder_text_elem):
+        """Find numbering text in table cells other than the placeholder cell.
+
+        Scans all text elements in the table looking for non-empty text that
+        is not the placeholder itself and not a placeholder pattern. Returns
+        the first such text found, which is assumed to be the numbering
+        indicator (e.g., "I", "1", "가").
+
+        Args:
+            tbl: The table element containing the header placeholder
+            placeholder_text_elem: The hp:t element containing the placeholder
+
+        Returns:
+            The numbering text string, or None if not found
+        """
+        for text_elem in tbl.findall('.//hp:t', self.namespaces):
+            if text_elem is placeholder_text_elem:
+                continue
+            if not text_elem.text:
+                continue
+            text = text_elem.text.strip()
+            if not text:
+                continue
+            # Skip if it's a placeholder pattern
+            if self.HEADER_PATTERN.search(text_elem.text):
+                continue
+            if self.CELL_PATTERN.search(text_elem.text):
+                continue
+            if self.PLACEHOLDER_PATTERN.search(text_elem.text):
+                continue
+            return text
+        return None
 
     def _collect_preceding_runs_prefix(self, para, current_run):
         """Collect prefix text and charPrIDRef from runs preceding current_run.
@@ -1164,6 +1206,11 @@ class MarkdownToHwpx:
                 column_break_val = 1
                 inlines = inlines[1:]  # Remove the LineBreak
 
+        # Reset child header counters when a parent header appears
+        for child_level in list(self.header_counters):
+            if child_level > level:
+                del self.header_counters[child_level]
+
         # Check for placeholder style first (e.g., {{H1}}, {{H2}}, etc.)
         placeholder_name = f'H{level}'
         if placeholder_name in self.placeholder_styles:
@@ -1172,7 +1219,12 @@ class MarkdownToHwpx:
 
             if mode == 'table':
                 # Header is inside a table in template - copy table structure
-                return self._handle_header_in_table(inlines, props, column_break_val)
+                # Track occurrence count for auto-numbering
+                if level not in self.header_counters:
+                    self.header_counters[level] = 0
+                self.header_counters[level] += 1
+                return self._handle_header_in_table(inlines, props, column_break_val,
+                                                    counter=self.header_counters[level])
             else:
                 # Plain or prefix mode - use template styles (prefix handled automatically)
                 return self._handle_header_styled(inlines, props, column_break_val)
@@ -1203,7 +1255,51 @@ class MarkdownToHwpx:
         self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
         return self._elem_to_str(para)
 
-    def _handle_header_in_table(self, inlines, props, column_break=0):
+    def _format_header_numbering(self, template_text, counter):
+        """Format header numbering text based on the template's pattern.
+
+        Detects the numbering format from the template text and produces the
+        corresponding value for the given counter. Supports Roman numerals,
+        Arabic numerals, and Korean syllables.
+
+        Args:
+            template_text: Original numbering text from template (e.g., "I", "1", "가")
+            counter: Current occurrence number (1-indexed)
+
+        Returns:
+            Formatted numbering string
+        """
+        stripped = template_text.strip()
+
+        # Roman numerals (uppercase)
+        roman_upper = [
+            'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X',
+            'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX',
+        ]
+        if stripped in roman_upper:
+            result = roman_upper[counter - 1] if counter <= len(roman_upper) else str(counter)
+            return template_text.replace(stripped, result)
+
+        # Roman numerals (lowercase)
+        roman_lower = [r.lower() for r in roman_upper]
+        if stripped in roman_lower:
+            result = roman_lower[counter - 1] if counter <= len(roman_lower) else str(counter)
+            return template_text.replace(stripped, result)
+
+        # Arabic numerals
+        if re.search(r'\d+', stripped):
+            return re.sub(r'\d+', str(counter), template_text, count=1)
+
+        # Korean syllables: 가 → 나 → 다 → ...
+        korean_jamo = '가나다라마바사아자차카타파하'
+        match = re.search(r'[가-하]', stripped)
+        if match and counter <= len(korean_jamo):
+            return template_text.replace(match.group(), korean_jamo[counter - 1])
+
+        # Fallback: return as-is
+        return template_text
+
+    def _handle_header_in_table(self, inlines, props, column_break=0, counter=1):
         """Handle header that's defined inside a table in template.
 
         Copies the entire table structure and replaces the placeholder
@@ -1217,6 +1313,7 @@ class MarkdownToHwpx:
             inlines: Inline content for the header
             props: Placeholder properties dict with table, charPrIDRef, paraPrIDRef, styleIDRef
             column_break: Column break value (0 or 1)
+            counter: Occurrence number for auto-numbering (1-indexed)
 
         Returns:
             XML string of the paragraph containing the table with header content
@@ -1229,6 +1326,15 @@ class MarkdownToHwpx:
 
         # Remove template-specific elements that shouldn't be in output
         self._remove_template_elements(table_elem)
+
+        # Auto-increment numbering cell if template has numbering text
+        numbering_text = props.get('numberingText')
+        if numbering_text:
+            formatted = self._format_header_numbering(numbering_text, counter)
+            for text_elem in table_elem.findall('.//hp:t', self.namespaces):
+                if text_elem.text and text_elem.text.strip() == numbering_text:
+                    text_elem.text = text_elem.text.replace(numbering_text, formatted)
+                    break
 
         # Find the cell containing the placeholder and replace with header content
         for para in table_elem.findall('.//hp:p', self.namespaces):
