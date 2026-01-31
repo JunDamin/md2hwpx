@@ -4,6 +4,8 @@
 /tests/*.html
 /tests/*.md
 /tests/*.docx
+/tests/mds
+/tests/hwpxs
 /tests/gov_output_extracted/
 /tests/ExportBlock-70f882fd-4d80-4add-ae90-cc3e9a98135f-Part-1/
 

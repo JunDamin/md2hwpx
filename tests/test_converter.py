@@ -642,40 +642,40 @@ class TestTableHeaderAutoNumbering:
         section_output, _ = converter.convert()
         assert 'Title' in section_output
 
-    def test_format_header_numbering_roman(self, blank_hwpx_path):
-        """Test _format_header_numbering with Roman numerals."""
+    def test_format_counter_text_roman(self, blank_hwpx_path):
+        """Test _format_counter_text with Roman numerals."""
         converter = _make_converter("Hello", blank_hwpx_path)
-        assert converter._format_header_numbering('I', 1) == 'I'
-        assert converter._format_header_numbering('I', 2) == 'II'
-        assert converter._format_header_numbering('I', 3) == 'III'
-        assert converter._format_header_numbering('I', 4) == 'IV'
-        assert converter._format_header_numbering('I', 10) == 'X'
+        assert converter._format_counter_text('I', 1) == 'I'
+        assert converter._format_counter_text('I', 2) == 'II'
+        assert converter._format_counter_text('I', 3) == 'III'
+        assert converter._format_counter_text('I', 4) == 'IV'
+        assert converter._format_counter_text('I', 10) == 'X'
 
-    def test_format_header_numbering_roman_lowercase(self, blank_hwpx_path):
-        """Test _format_header_numbering with lowercase Roman numerals."""
+    def test_format_counter_text_roman_lowercase(self, blank_hwpx_path):
+        """Test _format_counter_text with lowercase Roman numerals."""
         converter = _make_converter("Hello", blank_hwpx_path)
-        assert converter._format_header_numbering('i', 1) == 'i'
-        assert converter._format_header_numbering('i', 2) == 'ii'
-        assert converter._format_header_numbering('i', 3) == 'iii'
+        assert converter._format_counter_text('i', 1) == 'i'
+        assert converter._format_counter_text('i', 2) == 'ii'
+        assert converter._format_counter_text('i', 3) == 'iii'
 
-    def test_format_header_numbering_arabic(self, blank_hwpx_path):
-        """Test _format_header_numbering with Arabic numerals."""
+    def test_format_counter_text_arabic(self, blank_hwpx_path):
+        """Test _format_counter_text with Arabic numerals."""
         converter = _make_converter("Hello", blank_hwpx_path)
-        assert converter._format_header_numbering('1', 1) == '1'
-        assert converter._format_header_numbering('1', 2) == '2'
-        assert converter._format_header_numbering('1', 10) == '10'
+        assert converter._format_counter_text('1', 1) == '1'
+        assert converter._format_counter_text('1', 2) == '2'
+        assert converter._format_counter_text('1', 10) == '10'
 
-    def test_format_header_numbering_korean(self, blank_hwpx_path):
-        """Test _format_header_numbering with Korean syllables."""
+    def test_format_counter_text_korean(self, blank_hwpx_path):
+        """Test _format_counter_text with Korean syllables."""
         converter = _make_converter("Hello", blank_hwpx_path)
-        assert converter._format_header_numbering('\uac00', 1) == '\uac00'  # 가
-        assert converter._format_header_numbering('\uac00', 2) == '\ub098'  # 나
-        assert converter._format_header_numbering('\uac00', 3) == '\ub2e4'  # 다
+        assert converter._format_counter_text('\uac00', 1) == '\uac00'  # 가
+        assert converter._format_counter_text('\uac00', 2) == '\ub098'  # 나
+        assert converter._format_counter_text('\uac00', 3) == '\ub2e4'  # 다
 
-    def test_format_header_numbering_fallback(self, blank_hwpx_path):
+    def test_format_counter_text_fallback(self, blank_hwpx_path):
         """Unrecognized patterns should be returned as-is."""
         converter = _make_converter("Hello", blank_hwpx_path)
-        assert converter._format_header_numbering('Section', 2) == 'Section'
+        assert converter._format_counter_text('Section', 2) == 'Section'
 
     def test_child_counter_resets_on_parent_header(self, blank_hwpx_path):
         """H3 counter should reset when a new H2 appears.

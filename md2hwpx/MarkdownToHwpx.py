@@ -62,7 +62,7 @@ class MarkdownToHwpx:
         # List placeholder styles (bullet/ordered × levels 1-7)
         self.list_styles = {}
 
-        # Header counters for table-mode auto-numbering (level -> count)
+        # Header counters for auto-numbering (level -> count)
         self.header_counters = {}
 
         # XML Tree and CharPr Cache
@@ -828,6 +828,29 @@ class MarkdownToHwpx:
         prefix_text = ''.join(prefix_parts) if prefix_parts else None
         return prefix_text, prefix_char_pr_id
 
+    def _extract_prefix_with_preceding_runs(self, para, run, full_text, match_start):
+        """Extract prefix text from before a regex match, falling back to preceding runs.
+
+        First checks for inline prefix (text before the match in the same run).
+        If none found, collects prefix from preceding runs in the paragraph.
+
+        Args:
+            para: The paragraph element
+            run: The run element containing the match
+            full_text: The full text of the hp:t element
+            match_start: Start index of the match in full_text
+
+        Returns:
+            tuple of (prefix_text_or_None, prefix_char_pr_id_or_None)
+        """
+        prefix = full_text[:match_start]
+        prefix_char_pr_id = None
+        if not prefix:
+            preceding_prefix, prefix_char_pr_id = self._collect_preceding_runs_prefix(para, run)
+            if preceding_prefix:
+                prefix = preceding_prefix
+        return prefix if prefix else None, prefix_char_pr_id
+
     def _find_paragraph_placeholders(self, section_root, placeholders, list_styles):
         """Find header, list, and general placeholders in paragraphs.
 
@@ -847,14 +870,8 @@ class MarkdownToHwpx:
                     if list_match:
                         list_type = list_match.group(1).upper()
                         level = int(list_match.group(2))
-                        full_text = text_elem.text
-                        prefix = full_text[:list_match.start()]
-
-                        # Also check preceding runs for prefix text
-                        if not prefix:
-                            preceding_prefix, _ = self._collect_preceding_runs_prefix(para, run)
-                            if preceding_prefix:
-                                prefix = preceding_prefix
+                        prefix, _ = self._extract_prefix_with_preceding_runs(
+                            para, run, text_elem.text, list_match.start())
 
                         styles = self._extract_style_ids(para, run)
                         has_numbering, num_pr_id = self._check_para_pr_has_numbering(styles['paraPrIDRef'])
@@ -878,18 +895,13 @@ class MarkdownToHwpx:
                         header_name = header_match.group(1).upper()
                         # Only add if not already found in table
                         if header_name not in placeholders:
-                            full_text = text_elem.text
-                            prefix = full_text[:header_match.start()]
-
-                            # Check preceding runs for prefix in separate run
-                            preceding_prefix, prefix_char_pr_id = self._collect_preceding_runs_prefix(para, run)
-                            if not prefix and preceding_prefix:
-                                prefix = preceding_prefix
+                            prefix, prefix_char_pr_id = self._extract_prefix_with_preceding_runs(
+                                para, run, text_elem.text, header_match.start())
 
                             styles = self._extract_style_ids(para, run)
                             placeholders[header_name] = {
                                 **styles,
-                                'prefix': prefix if prefix else None,
+                                'prefix': prefix,
                                 'prefixCharPrIDRef': prefix_char_pr_id,
                                 'table': None,
                                 'mode': 'prefix' if prefix else 'plain',
@@ -906,18 +918,13 @@ class MarkdownToHwpx:
                         if placeholder_name.startswith('LIST_'):
                             continue
 
-                        full_text = text_elem.text
-                        prefix = full_text[:match.start()]
-
-                        # Check preceding runs for prefix in separate run
-                        preceding_prefix, prefix_char_pr_id = self._collect_preceding_runs_prefix(para, run)
-                        if not prefix and preceding_prefix:
-                            prefix = preceding_prefix
+                        prefix, prefix_char_pr_id = self._extract_prefix_with_preceding_runs(
+                            para, run, text_elem.text, match.start())
 
                         styles = self._extract_style_ids(para, run)
                         placeholders[placeholder_name] = {
                             **styles,
-                            'prefix': prefix if prefix else None,
+                            'prefix': prefix,
                             'prefixCharPrIDRef': prefix_char_pr_id,
                             'table': None,
                             'mode': 'prefix' if prefix else 'plain',
@@ -1258,15 +1265,18 @@ class MarkdownToHwpx:
         self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
         return self._elem_to_str(para)
 
-    def _format_header_numbering(self, template_text, counter):
-        """Format header numbering text based on the template's pattern.
+    def _format_counter_text(self, template_text, counter):
+        """Format numbering text by replacing the pattern with the counter value.
 
         Detects the numbering format from the template text and produces the
-        corresponding value for the given counter. Supports Roman numerals,
-        Arabic numerals, and Korean syllables.
+        corresponding value for the given counter. Used by both header
+        auto-numbering and list prefix formatting.
+
+        Supports: Roman numerals (I/i), Arabic numerals (1), Korean syllables (가).
+        Returns template_text unchanged if pattern is not recognized.
 
         Args:
-            template_text: Original numbering text from template (e.g., "I", "1", "가")
+            template_text: Original text containing a numbering pattern
             counter: Current occurrence number (1-indexed)
 
         Returns:
@@ -1289,15 +1299,15 @@ class MarkdownToHwpx:
             result = roman_lower[counter - 1] if counter <= len(roman_lower) else str(counter)
             return template_text.replace(stripped, result)
 
-        # Arabic numerals
-        if re.search(r'\d+', stripped):
+        # Arabic numerals: 1. → 2. → 3.
+        if re.search(r'\d+', template_text):
             return re.sub(r'\d+', str(counter), template_text, count=1)
 
-        # Korean syllables: 가 → 나 → 다 → ...
+        # Korean syllables: 가. → 나. → 다.
         korean_jamo = '가나다라마바사아자차카타파하'
-        match = re.search(r'[가-하]', stripped)
+        match = re.search(r'[가-하]', template_text)
         if match and counter <= len(korean_jamo):
-            return template_text.replace(match.group(), korean_jamo[counter - 1])
+            return template_text[:match.start()] + korean_jamo[counter - 1] + template_text[match.end():]
 
         # Fallback: return as-is
         return template_text
@@ -1333,7 +1343,7 @@ class MarkdownToHwpx:
         # Auto-increment numbering cell if template has numbering text
         numbering_text = props.get('numberingText')
         if numbering_text:
-            formatted = self._format_header_numbering(numbering_text, counter)
+            formatted = self._format_counter_text(numbering_text, counter)
             for text_elem in table_elem.findall('.//hp:t', self.namespaces):
                 if text_elem.text and text_elem.text.strip() == numbering_text:
                     text_elem.text = text_elem.text.replace(numbering_text, formatted)
@@ -1439,7 +1449,7 @@ class MarkdownToHwpx:
 
         # Add prefix as first run if present, with auto-numbering
         if prefix:
-            formatted_prefix = self._format_header_numbering(prefix, counter)
+            formatted_prefix = self._format_counter_text(prefix, counter)
             prefix_char_pr_id = props.get('prefixCharPrIDRef')
             prefix_cid = int(prefix_char_pr_id) if prefix_char_pr_id else char_pr_id
             prefix_run = self._create_text_run_elem(formatted_prefix, prefix_cid)
@@ -2813,6 +2823,9 @@ class MarkdownToHwpx:
     def _format_list_prefix(self, prefix_template, list_type, counter):
         """Format list prefix, incrementing numbers/letters for ordered lists.
 
+        Delegates to _format_counter_text for the actual formatting.
+        Bullet lists return the prefix unchanged.
+
         Args:
             prefix_template: Original prefix from template (e.g., "1. ", "가. ")
             list_type: 'BULLET' or 'ORDERED'
@@ -2821,22 +2834,10 @@ class MarkdownToHwpx:
         Returns:
             Formatted prefix string
         """
-        if list_type == 'BULLET':
-            return prefix_template  # Bullets don't change
+        if list_type == 'BULLET' or prefix_template is None:
+            return prefix_template
 
-        # For ordered lists, increment the number/letter
-        # Arabic numerals: 1. → 2. → 3.
-        if re.search(r'\d+', prefix_template):
-            return re.sub(r'\d+', str(counter), prefix_template, count=1)
-
-        # Korean syllables: 가. → 나. → 다.
-        korean_jamo = '가나다라마바사아자차카타파하'
-        match = re.search(r'[가-하]', prefix_template)
-        if match and counter <= len(korean_jamo):
-            return prefix_template[:match.start()] + korean_jamo[counter-1] + prefix_template[match.end():]
-
-        # Fallback: return as-is
-        return prefix_template
+        return self._format_counter_text(prefix_template, counter)
 
     def _handle_prefix_list_elem(self, content, list_type, level=0, start_num=1):
         """Handle list using prefix-based rendering (plain paragraphs with prefix text).

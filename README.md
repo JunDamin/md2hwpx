@@ -36,7 +36,7 @@ pip install md2hwpx
 ### 소스 설치
 
 ```bash
-git clone https://github.com/msjang/md2hwpx.git
+git clone https://github.com/jundamin/md2hwpx.git
 cd md2hwpx
 pip install -e .
 ```

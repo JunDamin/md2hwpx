@@ -33,10 +33,10 @@ setup(
         ],
     },
     author="md2hwpx Contributors",
-    url="https://github.com/msjang/md2hwpx",
+    url="https://github.com/jundamin/md2hwpx",
     project_urls={
-        "Source": "https://github.com/msjang/md2hwpx",
-        "Tracker": "https://github.com/msjang/md2hwpx/issues",
+        "Source": "https://github.com/jundamin/md2hwpx",
+        "Tracker": "https://github.com/jundamin/md2hwpx/issues",
         "Fork of": "https://github.com/msjang/pypandoc-hwpx",
     },
     description="Convert Markdown to HWPX (Korean Hancom Office format)",
