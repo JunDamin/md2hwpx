@@ -337,6 +337,130 @@ class TestConverterMultiRunPrefix:
         assert h3['prefixCharPrIDRef'] is None  # No separate run, no prefixCharPrIDRef
 
 
+class TestPrefixHeaderAutoNumbering:
+    """Test auto-incrementing prefix in prefix-mode headers."""
+
+    def _make_section_xml(self, prefix_text, placeholder, level_num):
+        """Create section XML with a prefix-mode header placeholder."""
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="10" styleIDRef="5" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="22"><hp:t>' + prefix_text + '</hp:t></hp:run>'
+            '<hp:run charPrIDRef="19"><hp:t>{{H' + str(level_num) + '}}</hp:t></hp:run>'
+            '</hp:p>'
+            '</hs:sec>'
+        )
+
+    def test_prefix_arabic_increments(self, blank_hwpx_path):
+        """Prefix '1. ' should become '1. ', '2. ', '3. ' for each header."""
+        md = "### First\n\nBody\n\n### Second\n\nBody\n\n### Third\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml('1. ', 'H3', 3)
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        assert '1. ' in section_output
+        assert '2. ' in section_output
+        assert '3. ' in section_output
+
+    def test_prefix_korean_increments(self, blank_hwpx_path):
+        """Prefix '가. ' should become '가. ', '나. ', '다. '."""
+        md = "### First\n\nBody\n\n### Second\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml('\uac00. ', 'H3', 3)
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        assert '\uac00. ' in section_output  # 가.
+        assert '\ub098. ' in section_output  # 나.
+
+    def test_prefix_static_symbol_unchanged(self, blank_hwpx_path):
+        """Non-numbering prefix like '□ ' should stay the same for all headers."""
+        md = "### First\n\nBody\n\n### Second\n\nBody"
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        section_xml = self._make_section_xml('\u25a1 ', 'H3', 3)
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        # □ should appear twice, unchanged
+        assert section_output.count('\u25a1 ') == 2
+
+    def test_prefix_resets_on_parent_header(self, blank_hwpx_path):
+        """Prefix counter should reset when a parent header appears.
+
+        ## A
+        ### X  → 1. X
+        ### Y  → 2. Y
+        ## B
+        ### Z  → 1. Z  (reset)
+        """
+        # H2 as plain (no prefix), H3 with numbering prefix
+        section_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"'
+            ' xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+            ' xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+            '<hp:p paraPrIDRef="10" styleIDRef="5" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="19"><hp:t>{{H2}}</hp:t></hp:run>'
+            '</hp:p>'
+            '<hp:p paraPrIDRef="10" styleIDRef="5" pageBreak="0" columnBreak="0" merged="0">'
+            '<hp:run charPrIDRef="22"><hp:t>1. </hp:t></hp:run>'
+            '<hp:run charPrIDRef="19"><hp:t>{{H3}}</hp:t></hp:run>'
+            '</hp:p>'
+            '</hs:sec>'
+        )
+        md = (
+            "## Chapter A\n\nBody\n\n"
+            "### Section X\n\nBody\n\n"
+            "### Section Y\n\nBody\n\n"
+            "## Chapter B\n\nBody\n\n"
+            "### Section Z\n\nBody\n\n"
+        )
+        ast = _parse_md(md)
+        header_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+        )
+
+        section_output, _ = converter.convert()
+        # "1. " should appear twice (once under each chapter)
+        assert section_output.count('1. ') == 2
+        # "2. " should appear once (only under Chapter A)
+        assert section_output.count('2. ') == 1
+
+
 class TestTableHeaderAutoNumbering:
     """Test auto-incrementing numbering in table-mode headers."""
 

@@ -1217,17 +1217,20 @@ class MarkdownToHwpx:
             props = self.placeholder_styles[placeholder_name]
             mode = props.get('mode', 'plain')
 
+            # Track occurrence count for auto-numbering
+            if level not in self.header_counters:
+                self.header_counters[level] = 0
+            self.header_counters[level] += 1
+            counter = self.header_counters[level]
+
             if mode == 'table':
                 # Header is inside a table in template - copy table structure
-                # Track occurrence count for auto-numbering
-                if level not in self.header_counters:
-                    self.header_counters[level] = 0
-                self.header_counters[level] += 1
                 return self._handle_header_in_table(inlines, props, column_break_val,
-                                                    counter=self.header_counters[level])
+                                                    counter=counter)
             else:
-                # Plain or prefix mode - use template styles (prefix handled automatically)
-                return self._handle_header_styled(inlines, props, column_break_val)
+                # Plain or prefix mode - use template styles
+                return self._handle_header_styled(inlines, props, column_break_val,
+                                                  counter=counter)
 
         # Fallback to existing style-based logic
         hwpx_level = level - 1
@@ -1407,19 +1410,22 @@ class MarkdownToHwpx:
         for child in elem.findall('hp:label', self.namespaces):
             elem.remove(child)
 
-    def _handle_header_styled(self, inlines, props, column_break=0):
+    def _handle_header_styled(self, inlines, props, column_break=0, counter=1):
         """Handle header with template styles (plain or prefix mode).
 
         Creates a paragraph with the template's styleIDRef, paraPrIDRef, and
         charPrIDRef. If a prefix is specified in props, it's prepended to the
-        header content. When the prefix comes from a separate run in the
-        template, prefixCharPrIDRef preserves its original character style.
+        header content. The prefix is auto-formatted using the counter (e.g.,
+        "1. " becomes "2. " for the second occurrence). When the prefix comes
+        from a separate run in the template, prefixCharPrIDRef preserves its
+        original character style.
 
         Args:
             inlines: Inline content for the header
             props: Placeholder properties dict with charPrIDRef, paraPrIDRef,
                    styleIDRef, optional prefix, and optional prefixCharPrIDRef
             column_break: Column break value (0 or 1)
+            counter: Occurrence number for auto-numbering the prefix (1-indexed)
 
         Returns:
             XML string of the paragraph
@@ -1431,11 +1437,12 @@ class MarkdownToHwpx:
 
         para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break)
 
-        # Add prefix as first run if present
+        # Add prefix as first run if present, with auto-numbering
         if prefix:
+            formatted_prefix = self._format_header_numbering(prefix, counter)
             prefix_char_pr_id = props.get('prefixCharPrIDRef')
             prefix_cid = int(prefix_char_pr_id) if prefix_char_pr_id else char_pr_id
-            prefix_run = self._create_text_run_elem(prefix, prefix_cid)
+            prefix_run = self._create_text_run_elem(formatted_prefix, prefix_cid)
             para.append(prefix_run)
 
         # Add header content
