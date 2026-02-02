@@ -1651,113 +1651,24 @@ class MarkdownToHwpx:
 
         return "\n".join(results)
 
-    def _ensure_hr_border_fill(self):
-        """Create a borderFill for horizontal rules if not already created.
-
-        Returns:
-            borderFill ID string for horizontal rules
-        """
-        if hasattr(self, '_hr_border_fill_id'):
-            return self._hr_border_fill_id
-
-        root = self.header_root
-        if root is None:
-            self._hr_border_fill_id = '1'
-            return self._hr_border_fill_id
-
-        border_fills = root.find('.//hh:borderFills', self.namespaces)
-        if border_fills is None:
-            border_fills = ET.SubElement(root, f'{{{NS_HEAD}}}borderFills')
-
-        max_id = 0
-        for bf in border_fills.findall('hh:borderFill', self.namespaces):
-            bid = int(bf.get('id', 0))
-            if bid > max_id:
-                max_id = bid
-
-        new_id = str(max_id + 1)
-        self._hr_border_fill_id = new_id
-
-        hr_type = self.config.HR_BORDER_TYPE
-        hr_width = self.config.HR_BORDER_WIDTH
-        hr_color = self.config.HR_BORDER_COLOR
-
-        xml_str = f'''<hh:borderFill id="{new_id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
-            <hh:slash type="NONE" Crooked="0" isCounter="0"/>
-            <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
-            <hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>
-            <hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>
-            <hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>
-            <hh:bottomBorder type="{hr_type}" width="{hr_width}" color="{hr_color}"/>
-            <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
-            <hc:fillBrush>
-              <hc:winBrush faceColor="none" hatchColor="#000000" alpha="0"/>
-            </hc:fillBrush>
-        </hh:borderFill>'''.strip()
-
-        new_node = ET.fromstring(xml_str)
-        border_fills.append(new_node)
-
-        return self._hr_border_fill_id
-
-    def _get_hr_para_pr(self):
-        """Create a paraPr for horizontal rule with bottom border.
-
-        Returns:
-            paraPr ID string
-        """
-        if hasattr(self, '_hr_para_pr_id'):
-            return self._hr_para_pr_id
-
-        border_fill_id = self._ensure_hr_border_fill()
-
-        base_id = self.normal_para_pr_id
-        base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
-        if base_node is None:
-            self._hr_para_pr_id = base_id
-            return self._hr_para_pr_id
-
-        new_node = copy.deepcopy(base_node)
-        self.max_para_pr_id += 1
-        new_id = str(self.max_para_pr_id)
-        new_node.set('id', new_id)
-
-        # Set border reference to our HR borderFill
-        border = new_node.find('hh:border', self.namespaces)
-        if border is None:
-            border = ET.SubElement(new_node, f'{{{NS_HEAD}}}border')
-        border.set('borderFillIDRef', border_fill_id)
-        border.set('offsetLeft', '0')
-        border.set('offsetRight', '0')
-        border.set('offsetTop', '0')
-        border.set('offsetBottom', '400')
-        border.set('connect', '0')
-        border.set('ignoreMargin', '0')
-
-        para_props = self.header_root.find('.//hh:paraProperties', self.namespaces)
-        if para_props is not None:
-            para_props.append(new_node)
-
-        self._hr_para_pr_id = new_id
-        return self._hr_para_pr_id
-
     def _handle_horizontal_rule(self):
         """Handle horizontal rule block.
 
-        Renders as an empty paragraph with a bottom border line.
+        Renders as two empty paragraphs to create visual separation.
 
         Returns:
-            XML string of the horizontal rule paragraph
+            XML string of two empty paragraphs
         """
-        hr_para_pr = self._get_hr_para_pr()
-        para = self._create_para_elem(
-            style_id=self.normal_style_id,
-            para_pr_id=hr_para_pr
-        )
-        # Empty run to create a valid paragraph
-        run = self._create_text_run_elem(" ")
-        para.append(run)
-        return self._elem_to_str(para)
+        result = ''
+        for _ in range(2):
+            para = self._create_para_elem(
+                style_id=self.normal_style_id,
+                para_pr_id=self.normal_para_pr_id
+            )
+            run = self._create_text_run_elem(" ")
+            para.append(run)
+            result += self._elem_to_str(para)
+        return result
 
     def _get_row_type(self, row_idx, header_row_count, total_body_rows):
         """Determine row type: HEADER, TOP, MIDDLE, or BOTTOM.

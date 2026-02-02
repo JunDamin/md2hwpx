@@ -53,11 +53,6 @@ class ConversionConfig:
     BLOCKQUOTE_LEFT_INDENT = 2000  # Left margin indent for block quotes
     BLOCKQUOTE_INDENT_PER_LEVEL = 2000  # Additional indent per nesting level
 
-    # === Horizontal Rule ===
-    HR_BORDER_TYPE = 'SOLID'
-    HR_BORDER_WIDTH = '0.4 mm'
-    HR_BORDER_COLOR = '#AAAAAA'
-
     # === Link Styling ===
     LINK_COLOR = '#0000FF'  # Blue
     LINK_UNDERLINE = True

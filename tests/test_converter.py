@@ -948,14 +948,14 @@ class TestConverterHorizontalRule:
         xml_body, _ = converter.convert()
         assert 'Above' in xml_body
         assert 'Below' in xml_body
-        # HR creates an additional paragraph
-        assert xml_body.count('<hp:p') >= 3
+        # HR creates two empty paragraphs plus Above and Below = 4+
+        assert xml_body.count('<hp:p') >= 4
 
-    def test_horizontal_rule_creates_border_fill(self, blank_hwpx_path):
+    def test_horizontal_rule_two_empty_paragraphs(self, blank_hwpx_path):
         converter = _make_converter("---", blank_hwpx_path)
-        xml_body, header_xml = converter.convert()
-        # Should create a borderFill with bottom border for HR
-        assert 'bottomBorder' in header_xml
+        xml_body, _ = converter.convert()
+        # HR renders as two empty paragraphs
+        assert xml_body.count('<hp:p') == 2
 
     def test_horizontal_rule_standalone(self, blank_hwpx_path):
         converter = _make_converter("---", blank_hwpx_path)
