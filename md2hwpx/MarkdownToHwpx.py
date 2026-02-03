@@ -65,6 +65,9 @@ class MarkdownToHwpx:
         # Header counters for auto-numbering (level -> count)
         self.header_counters = {}
 
+        # Track whether any block has been emitted (for page break before H1)
+        self._has_emitted_block = False
+
         # XML Tree and CharPr Cache
         self.header_tree = None
         self.header_root = None
@@ -1141,6 +1144,9 @@ class MarkdownToHwpx:
                 # logger.warning("Unhandled Block Type: %s", b_type)
                 pass
 
+            if result:
+                self._has_emitted_block = True
+
         return "\n".join(result)
 
     def _escape_text(self, text):
@@ -1175,12 +1181,12 @@ class MarkdownToHwpx:
 
     # --- Paragraph/Run Element Creators ---
 
-    def _create_para_elem(self, style_id=0, para_pr_id=1, column_break=0, merged=0):
+    def _create_para_elem(self, style_id=0, para_pr_id=1, column_break=0, merged=0, page_break=0):
         """Create paragraph element."""
         return self._make_elem(NS_PARA, 'p', {
             'paraPrIDRef': str(para_pr_id),
             'styleIDRef': str(style_id),
-            'pageBreak': '0',
+            'pageBreak': str(page_break),
             'columnBreak': str(column_break),
             'merged': str(merged)
         })
@@ -1213,6 +1219,11 @@ class MarkdownToHwpx:
                 column_break_val = 1
                 inlines = inlines[1:]  # Remove the LineBreak
 
+        # Page break before H1 when not the first block in the document
+        page_break_val = 0
+        if level == 1 and self._has_emitted_block and self.config.PAGE_BREAK_BEFORE_H1:
+            page_break_val = 1
+
         # Reset child header counters when a parent header appears
         for child_level in list(self.header_counters):
             if child_level > level:
@@ -1233,11 +1244,11 @@ class MarkdownToHwpx:
             if mode == 'table':
                 # Header is inside a table in template - copy table structure
                 return self._handle_header_in_table(inlines, props, column_break_val,
-                                                    counter=counter)
+                                                    counter=counter, page_break=page_break_val)
             else:
                 # Plain or prefix mode - use template styles
                 return self._handle_header_styled(inlines, props, column_break_val,
-                                                  counter=counter)
+                                                  counter=counter, page_break=page_break_val)
 
         # Fallback to existing style-based logic
         hwpx_level = level - 1
@@ -1261,7 +1272,8 @@ class MarkdownToHwpx:
                 para_pr_id = style_node.get('paraPrIDRef', 0)
                 char_pr_id = style_node.get('charPrIDRef', 0)
 
-        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break_val)
+        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id,
+                                      column_break=column_break_val, page_break=page_break_val)
         self._process_inlines_to_elems(inlines, para, base_char_pr_id=int(char_pr_id))
         return self._elem_to_str(para)
 
@@ -1312,7 +1324,7 @@ class MarkdownToHwpx:
         # Fallback: return as-is
         return template_text
 
-    def _handle_header_in_table(self, inlines, props, column_break=0, counter=1):
+    def _handle_header_in_table(self, inlines, props, column_break=0, counter=1, page_break=0):
         """Handle header that's defined inside a table in template.
 
         Copies the entire table structure and replaces the placeholder
@@ -1368,7 +1380,8 @@ class MarkdownToHwpx:
         wrapper_para = self._create_para_elem(
             style_id=self.normal_style_id,
             para_pr_id=self.normal_para_pr_id,
-            column_break=column_break
+            column_break=column_break,
+            page_break=page_break
         )
         wrapper_run = self._create_run_elem(char_pr_id=0)
         wrapper_run.append(table_elem)
@@ -1420,7 +1433,7 @@ class MarkdownToHwpx:
         for child in elem.findall('hp:label', self.namespaces):
             elem.remove(child)
 
-    def _handle_header_styled(self, inlines, props, column_break=0, counter=1):
+    def _handle_header_styled(self, inlines, props, column_break=0, counter=1, page_break=0):
         """Handle header with template styles (plain or prefix mode).
 
         Creates a paragraph with the template's styleIDRef, paraPrIDRef, and
@@ -1445,7 +1458,8 @@ class MarkdownToHwpx:
         style_id = int(props.get('styleIDRef', self.normal_style_id))
         prefix = props.get('prefix')
 
-        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id, column_break=column_break)
+        para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id,
+                                      column_break=column_break, page_break=page_break)
 
         # Add prefix as first run if present, with auto-numbering
         if prefix:

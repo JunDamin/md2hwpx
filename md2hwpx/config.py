@@ -53,6 +53,9 @@ class ConversionConfig:
     BLOCKQUOTE_LEFT_INDENT = 2000  # Left margin indent for block quotes
     BLOCKQUOTE_INDENT_PER_LEVEL = 2000  # Additional indent per nesting level
 
+    # === Page Break ===
+    PAGE_BREAK_BEFORE_H1 = True  # Insert page break before H1 when not first block
+
     # === Link Styling ===
     LINK_COLOR = '#0000FF'  # Blue
     LINK_UNDERLINE = True

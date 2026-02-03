@@ -961,3 +961,43 @@ class TestConverterHorizontalRule:
         converter = _make_converter("---", blank_hwpx_path)
         xml_body, _ = converter.convert()
         assert '<hp:p' in xml_body
+
+
+class TestPageBreakBeforeH1:
+    """Test automatic page break before H1 in middle of document."""
+
+    def test_h1_at_start_no_page_break(self, blank_hwpx_path):
+        converter = _make_converter("# First Header", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        assert 'pageBreak="0"' in xml_body
+
+    def test_h1_in_middle_has_page_break(self, blank_hwpx_path):
+        converter = _make_converter("Some text\n\n# Second Header", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        assert 'pageBreak="1"' in xml_body
+
+    def test_h2_in_middle_no_page_break(self, blank_hwpx_path):
+        converter = _make_converter("Some text\n\n## Second Header", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        assert 'pageBreak="1"' not in xml_body
+
+    def test_config_disable_page_break(self, blank_hwpx_path):
+        from md2hwpx.config import ConversionConfig
+        config = ConversionConfig()
+        config.PAGE_BREAK_BEFORE_H1 = False
+        ast = _parse_md("Some text\n\n# Second Header")
+        header_xml = ""
+        section_xml = ""
+        with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+            if "Contents/header.xml" in z.namelist():
+                header_xml = z.read("Contents/header.xml").decode('utf-8')
+            if "Contents/section0.xml" in z.namelist():
+                section_xml = z.read("Contents/section0.xml").decode('utf-8')
+        converter = MarkdownToHwpx(
+            json_ast=ast,
+            header_xml_content=header_xml,
+            section_xml_content=section_xml,
+            config=config,
+        )
+        xml_body, _ = converter.convert()
+        assert 'pageBreak="1"' not in xml_body
