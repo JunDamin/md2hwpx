@@ -1039,3 +1039,66 @@ class TestBrLineBreak:
         )
         xml_body, _ = converter.convert()
         assert xml_body.count('lineBreak') >= 2
+
+
+def _make_converter_with_config(md_text, blank_hwpx_path, config):
+    """Helper: create converter from markdown text with custom config."""
+    ast = _parse_md(md_text)
+    header_xml = ""
+    section_xml = ""
+    with zipfile.ZipFile(blank_hwpx_path, 'r') as z:
+        if "Contents/header.xml" in z.namelist():
+            header_xml = z.read("Contents/header.xml").decode('utf-8')
+        if "Contents/section0.xml" in z.namelist():
+            section_xml = z.read("Contents/section0.xml").decode('utf-8')
+    return MarkdownToHwpx(
+        json_ast=ast,
+        header_xml_content=header_xml,
+        section_xml_content=section_xml,
+        config=config,
+    )
+
+
+class TestBlankLineBeforeHeader:
+    """Test blank line insertion before headers in the middle of a document."""
+
+    def test_feature_disabled_by_default(self, blank_hwpx_path):
+        """Feature is off by default — paragraph count should not include an extra blank para."""
+        converter = _make_converter("Some text\n\n## Section", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        # Two blocks: one Para, one Header → exactly 2 <hp:p elements
+        assert xml_body.count('<hp:p ') == 2
+
+    def test_blank_line_inserted_before_header_in_middle(self, blank_hwpx_path):
+        """When enabled, a blank paragraph should be inserted before an H2 in the middle."""
+        config = ConversionConfig()
+        config.BLANK_LINE_BEFORE_HEADER = True
+        config.BLANK_LINE_BEFORE_HEADER_LEVELS = (1, 2, 3)
+        converter = _make_converter_with_config(
+            "Some text\n\n## Section", blank_hwpx_path, config
+        )
+        xml_body, _ = converter.convert()
+        # Three blocks: Para + blank Para + Header
+        assert xml_body.count('<hp:p ') == 3
+
+    def test_no_blank_line_before_first_block(self, blank_hwpx_path):
+        """No blank line is inserted before a header that is the very first block."""
+        config = ConversionConfig()
+        config.BLANK_LINE_BEFORE_HEADER = True
+        config.BLANK_LINE_BEFORE_HEADER_LEVELS = (1, 2, 3)
+        converter = _make_converter_with_config("## First Header", blank_hwpx_path, config)
+        xml_body, _ = converter.convert()
+        # Only one block: the header itself
+        assert xml_body.count('<hp:p ') == 1
+
+    def test_level_filtering(self, blank_hwpx_path):
+        """Only headers at configured levels get a blank line."""
+        config = ConversionConfig()
+        config.BLANK_LINE_BEFORE_HEADER = True
+        config.BLANK_LINE_BEFORE_HEADER_LEVELS = (1,)  # Only H1
+        converter = _make_converter_with_config(
+            "Some text\n\n## H2 Section", blank_hwpx_path, config
+        )
+        xml_body, _ = converter.convert()
+        # H2 is not in the configured levels → no blank line, only 2 paragraphs
+        assert xml_body.count('<hp:p ') == 2

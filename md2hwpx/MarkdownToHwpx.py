@@ -32,6 +32,9 @@ class MarkdownToHwpx:
     LIST_PATTERN = re.compile(r'\{\{LIST_(BULLET|ORDERED)_(\d+)\}\}')
     HEADER_PATTERN = re.compile(r'\{\{(H[1-9])\}\}')
 
+    # Simple character format tags: format name -> XML tag name (in head namespace)
+    _SIMPLE_FORMAT_TAGS = {'BOLD': 'bold', 'ITALIC': 'italic'}
+
     def __init__(self, json_ast=None, header_xml_content=None, section_xml_content=None, input_path=None, config=None):
         self.ast = json_ast
         self.header_xml_content = header_xml_content
@@ -82,6 +85,18 @@ class MarkdownToHwpx:
         self.max_char_pr_id = 0
 
         self.images = [] # metadata for images
+
+        # Block handler dispatch table (instance-level allows subclass/test overrides)
+        self._block_handlers = {
+            'Para':           self._handle_para,
+            'Plain':          self._handle_plain,
+            'BulletList':     self._handle_bullet_list,
+            'OrderedList':    self._handle_ordered_list,
+            'CodeBlock':      self._handle_code_block,
+            'Table':          self._handle_table,
+            'BlockQuote':     self._handle_blockquote,
+            'HorizontalRule': lambda _: self._handle_horizontal_rule(),
+        }
 
         # Metadata extraction
         self.title = None
@@ -1108,11 +1123,18 @@ class MarkdownToHwpx:
 
         return xml_body, new_header_xml
 
+    def _make_empty_para(self):
+        """Create an empty paragraph (blank line) for pre-block spacing."""
+        para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
+        run = self._create_text_run_elem(" ")
+        para.append(run)
+        return self._elem_to_str(para)
+
     def _process_blocks(self, blocks):
         result = []
         if not isinstance(blocks, list):
-             logger.error("_process_blocks expected list, got %s: %s", type(blocks), blocks)
-             return ""
+            logger.error("_process_blocks expected list, got %s: %s", type(blocks), blocks)
+            return ""
 
         for block in blocks:
             if not isinstance(block, dict):
@@ -1123,31 +1145,29 @@ class MarkdownToHwpx:
             b_content = block.get('c')
 
             if b_type == 'Header':
+                # Pre-block hook: blank line before header (only when not first block)
+                if self._has_emitted_block:
+                    level = b_content[0] if b_content else 0
+                    if (self.config.BLANK_LINE_BEFORE_HEADER
+                            and level in self.config.BLANK_LINE_BEFORE_HEADER_LEVELS):
+                        result.append(self._make_empty_para())
                 result.append(self._handle_header(b_content))
-            elif b_type == 'Para':
-                result.append(self._handle_para(b_content))
-            elif b_type == 'Plain':
-                result.append(self._handle_plain(b_content))
-            elif b_type == 'BulletList':
-                result.append(self._handle_bullet_list(b_content))
-            elif b_type == 'OrderedList':
-                result.append(self._handle_ordered_list(b_content))
-            elif b_type == 'CodeBlock':
-                result.append(self._handle_code_block(b_content))
-            elif b_type == 'Table':
-                result.append(self._handle_table(b_content))
-            elif b_type == 'BlockQuote':
-                result.append(self._handle_blockquote(b_content))
-            elif b_type == 'HorizontalRule':
-                result.append(self._handle_horizontal_rule())
             else:
-                # logger.warning("Unhandled Block Type: %s", b_type)
-                pass
+                handler = self._block_handlers.get(b_type)
+                if handler is not None:
+                    result.append(handler(b_content))
+                elif b_type is not None:
+                    logger.debug("Unhandled block type: %s", b_type)
 
             if result:
                 self._has_emitted_block = True
 
         return "\n".join(result)
+
+    def _generate_id(self, digits=8):
+        """Generate a pseudo-unique numeric ID string for HWPX elements."""
+        modulus = 10 ** digits
+        return str((int(time.time() * 1000000) + random.randint(0, modulus)) % modulus)
 
     def _escape_text(self, text):
         """Escape text content for XML elements."""
@@ -1807,7 +1827,7 @@ class MarkdownToHwpx:
             col_widths = [int(TOTAL_TABLE_WIDTH / col_cnt) for _ in specs]
 
         # Generate IDs
-        tbl_id = str(int(time.time() * 1000) % 100000000 + random.randint(0, 10000))
+        tbl_id = self._generate_id()
 
         # Create paragraph > run > table structure
         para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=self.normal_para_pr_id)
@@ -1823,11 +1843,11 @@ class MarkdownToHwpx:
             'lock': '0',
             'dropcapstyle': 'None',
             'pageBreak': 'CELL',
-            'repeatHeader': '1',
+            'repeatHeader': '1' if self.config.TABLE_REPEAT_HEADER else '0',
             'rowCnt': str(row_cnt),
             'colCnt': str(col_cnt),
             'cellSpacing': '0',
-            'borderFillIDRef': '3',
+            'borderFillIDRef': self.table_border_fill_id,
             'noAdjust': '0'
         })
 
@@ -1897,7 +1917,7 @@ class MarkdownToHwpx:
                     for i in range(colspan)
                 )
 
-                sublist_id = str(int(time.time() * 100000) % 1000000000 + random.randint(0, 100000))
+                sublist_id = self._generate_id(digits=9)
 
                 # Determine cell style based on position
                 row_type = self._get_row_type(curr_row_addr, header_row_count, body_row_count)
@@ -2247,9 +2267,7 @@ class MarkdownToHwpx:
         height = height_hwp
 
         # Generate Binary ID
-        timestamp = int(time.time() * 1000)
-        rand = random.randint(0, 1000000)
-        binary_item_id = f"img_{timestamp}_{rand}"
+        binary_item_id = f"img_{self._generate_id(digits=12)}"
 
         # Extract Extension
         ext = "png"
@@ -2269,8 +2287,8 @@ class MarkdownToHwpx:
         })
 
         # Generate Element
-        pic_id = str(timestamp % 100000000 + rand)
-        inst_id = str(random.randint(10000000, 99999999))
+        pic_id = self._generate_id()
+        inst_id = self._generate_id()
 
         run = self._create_run_elem(char_pr_id)
 
@@ -2351,7 +2369,7 @@ class MarkdownToHwpx:
 
     def _create_field_begin_elem(self, url):
         """Create field begin element for hyperlink (ElementTree version)."""
-        fid = str(int(time.time() * 1000) % 100000000)
+        fid = self._generate_id()
         self.last_field_id = fid
 
         # Command needs escaping for HWPX format
@@ -2393,7 +2411,7 @@ class MarkdownToHwpx:
 
     def _create_footnote_elem(self, blocks):
         """Create footnote element (ElementTree version)."""
-        inst_id = str(random.randint(1000000, 999999999))
+        inst_id = self._generate_id(digits=9)
 
         # Create run > ctrl > footNote structure
         run = self._create_run_elem(char_pr_id=0)
@@ -2465,13 +2483,11 @@ class MarkdownToHwpx:
         new_node.set('id', new_id)
 
         # Modify properties based on formats
-        if 'BOLD' in active_formats:
-            if new_node.find('hh:bold', self.namespaces) is None:
-                ET.SubElement(new_node, f'{{{NS_HEAD}}}bold')
-
-        if 'ITALIC' in active_formats:
-            if new_node.find('hh:italic', self.namespaces) is None:
-                ET.SubElement(new_node, f'{{{NS_HEAD}}}italic')
+        # Simple formats: just add element if absent
+        for fmt, tag in self._SIMPLE_FORMAT_TAGS.items():
+            if fmt in active_formats:
+                if new_node.find(f'hh:{tag}', self.namespaces) is None:
+                    ET.SubElement(new_node, f'{{{NS_HEAD}}}{tag}')
 
         if 'UNDERLINE' in active_formats:
             ul = new_node.find('hh:underline', self.namespaces)
@@ -2482,32 +2498,26 @@ class MarkdownToHwpx:
             ul.set('color', '#000000')
 
         if 'COLOR_BLUE' in active_formats:
-            # <hh:textColor value="#0000FF"/>
-            # Note: HWPX color logic sometimes weird, but #RRGGBB standard often works.
-            # Sample: <hh:textColor value="#000000"/>
-            # Blue: #0000FF
             tc = new_node.find('hh:textColor', self.namespaces)
             if tc is None:
                 tc = ET.SubElement(new_node, f'{{{NS_HEAD}}}textColor')
-            tc.set('value', '#0000FF')
-
-            # Also force underline color to Blue if underline exists?
+            tc.set('value', self.config.LINK_COLOR)
             ul = new_node.find('hh:underline', self.namespaces)
             if ul is not None:
-                ul.set('color', '#0000FF')
+                ul.set('color', self.config.LINK_COLOR)
 
         if 'SUPERSCRIPT' in active_formats:
-             sub = new_node.find('hh:subscript', self.namespaces)
-             if sub is not None:
-                 new_node.remove(sub)
-             if new_node.find('hh:supscript', self.namespaces) is None:
+            sub = new_node.find('hh:subscript', self.namespaces)
+            if sub is not None:
+                new_node.remove(sub)
+            if new_node.find('hh:supscript', self.namespaces) is None:
                 ET.SubElement(new_node, f'{{{NS_HEAD}}}supscript')
 
         elif 'SUBSCRIPT' in active_formats:
-             sup = new_node.find('hh:supscript', self.namespaces)
-             if sup is not None:
-                 new_node.remove(sup)
-             if new_node.find('hh:subscript', self.namespaces) is None:
+            sup = new_node.find('hh:supscript', self.namespaces)
+            if sup is not None:
+                new_node.remove(sup)
+            if new_node.find('hh:subscript', self.namespaces) is None:
                 ET.SubElement(new_node, f'{{{NS_HEAD}}}subscript')
 
         # 4. Add to Header
@@ -2639,6 +2649,31 @@ class MarkdownToHwpx:
 
         return new_id
 
+    def _handle_list_elem_fallback(self, items, list_type, level, start_num=1):
+        """Shared fallback for bullet and ordered lists when no template style is defined."""
+        num_id = self._create_numbering(list_type, start_num=start_num)
+        elements = []
+        for item_blocks in items:
+            for block in item_blocks:
+                b_type = block.get('t')
+                b_content = block.get('c')
+                list_para_pr = self._get_list_para_pr(num_id, level)
+                if b_type in ('Para', 'Plain'):
+                    para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=list_para_pr)
+                    self._process_inlines_to_elems(b_content, para)
+                    elements.append(para)
+                elif b_type == 'BulletList':
+                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
+                elif b_type == 'OrderedList':
+                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
+                else:
+                    block_xml = self._process_blocks([block])
+                    if block_xml.strip():
+                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
+                        for elem in ET.fromstring(wrapper):
+                            elements.append(elem)
+        return elements
+
     def _handle_bullet_list_elem(self, content, level=0):
         """Handle bullet list and return list of Elements (ElementTree version)."""
         if level >= self.config.MAX_NESTING_DEPTH:
@@ -2659,34 +2694,7 @@ class MarkdownToHwpx:
                 # USE PREFIX MODE
                 return self._handle_prefix_list_elem(content, 'BULLET', level)
 
-        # FALLBACK to existing auto-numbering (create new)
-        num_id = self._create_numbering('BULLET')
-
-        elements = []
-        for item_blocks in content:
-            for block in item_blocks:
-                b_type = block.get('t')
-                b_content = block.get('c')
-
-                list_para_pr = self._get_list_para_pr(num_id, level)
-
-                if b_type == 'Para' or b_type == 'Plain':
-                    para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=list_para_pr)
-                    self._process_inlines_to_elems(b_content, para)
-                    elements.append(para)
-                elif b_type == 'BulletList':
-                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
-                elif b_type == 'OrderedList':
-                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
-                else:
-                    # For other block types, use legacy processing
-                    block_xml = self._process_blocks([block])
-                    if block_xml.strip():
-                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
-                        for elem in ET.fromstring(wrapper):
-                            elements.append(elem)
-
-        return elements
+        return self._handle_list_elem_fallback(content, 'BULLET', level)
 
     def _handle_bullet_list(self, content, level=0):
         """Handle bullet list (legacy wrapper returning string)."""
@@ -2718,35 +2726,7 @@ class MarkdownToHwpx:
                 # USE PREFIX MODE
                 return self._handle_prefix_list_elem(items, 'ORDERED', level, start_num=start_num)
 
-        # FALLBACK to existing auto-numbering (create new)
-        num_id = self._create_numbering('ORDERED', start_num=start_num)
-
-        elements = []
-        for item_blocks in items:
-            for block in item_blocks:
-                b_type = block.get('t')
-                b_content = block.get('c')
-
-                list_para_pr = self._get_list_para_pr(num_id, level)
-
-                if b_type == 'Para' or b_type == 'Plain':
-                    para = self._create_para_elem(style_id=self.normal_style_id, para_pr_id=list_para_pr)
-                    self._process_inlines_to_elems(b_content, para)
-                    elements.append(para)
-                elif b_type == 'BulletList':
-                    elements.extend(self._handle_bullet_list_elem(b_content, level=level+1))
-                elif b_type == 'OrderedList':
-                    # Recursively handle nested ordered list
-                    elements.extend(self._handle_ordered_list_elem(b_content, level=level+1))
-                else:
-                    # For other block types, use legacy processing
-                    block_xml = self._process_blocks([block])
-                    if block_xml.strip():
-                        wrapper = f'<root xmlns:hp="{NS_PARA}" xmlns:hc="{NS_CORE}">{block_xml}</root>'
-                        for elem in ET.fromstring(wrapper):
-                            elements.append(elem)
-
-        return elements
+        return self._handle_list_elem_fallback(items, 'ORDERED', level, start_num=start_num)
 
     def _handle_ordered_list(self, content, level=0):
         """Handle ordered list (legacy wrapper returning string)."""

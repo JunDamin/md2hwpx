@@ -56,6 +56,13 @@ class ConversionConfig:
     # === Page Break ===
     PAGE_BREAK_BEFORE_H1 = True  # Insert page break before H1 when not first block
 
+    # === Header Spacing ===
+    BLANK_LINE_BEFORE_HEADER: bool = False          # Insert empty para before headers in middle of doc
+    BLANK_LINE_BEFORE_HEADER_LEVELS: tuple = (1, 2, 3)  # Which header levels get blank lines
+
+    # === Table Options ===
+    TABLE_REPEAT_HEADER: bool = True                # repeatHeader attribute on tbl element
+
     # === Link Styling ===
     LINK_COLOR = '#0000FF'  # Blue
     LINK_UNDERLINE = True

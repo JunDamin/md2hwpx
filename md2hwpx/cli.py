@@ -15,9 +15,8 @@ from .marko_adapter import MarkoToPandocAdapter
 from .MarkdownToHtml import MarkdownToHtml
 from .MarkdownToHwpx import MarkdownToHwpx
 from .exceptions import HwpxError, SecurityError
-from .config import DEFAULT_CONFIG
-
-__version__ = "0.1.0"
+from .config import DEFAULT_CONFIG, ConversionConfig
+from . import __version__
 
 logger = logging.getLogger('md2hwpx')
 
@@ -65,6 +64,8 @@ def main():
                         help="Show detailed debug output")
     parser.add_argument("-q", "--quiet", action="store_true", default=False,
                         help="Suppress all non-error output")
+    parser.add_argument("--blank-line-before-header", action="store_true", default=False,
+                        help="Insert a blank line before headers (H1-H3) in the middle of the document")
 
     args = parser.parse_args()
 
@@ -115,9 +116,14 @@ def main():
     # Inject metadata into AST
     ast['meta'] = convert_metadata_to_pandoc_meta(metadata)
 
+    # Build config from CLI flags
+    config = ConversionConfig()
+    if args.blank_line_before_header:
+        config.BLANK_LINE_BEFORE_HEADER = True
+
     try:
         if output_ext == ".hwpx":
-            MarkdownToHwpx.convert_to_hwpx(input_file, args.output, ref_doc, json_ast=ast)
+            MarkdownToHwpx.convert_to_hwpx(input_file, args.output, ref_doc, json_ast=ast, config=config)
             logger.info("Successfully converted to %s", args.output)
 
         elif output_ext == ".json":
