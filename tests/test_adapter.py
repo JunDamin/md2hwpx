@@ -287,3 +287,72 @@ class TestAdapterHorizontalRule:
         blocks = result['blocks']
         assert len(blocks) == 1
         assert blocks[0]['t'] == 'HorizontalRule'
+
+
+class TestAdapterFallbackEmphasis:
+    """Test fallback emphasis parsing for CommonMark edge cases.
+
+    When bold/italic text ends with punctuation (e.g., ')') and is
+    immediately followed by a word character (e.g., Korean '를'),
+    Marko's CommonMark parser fails to recognize the closing delimiter.
+    The fallback parser in _convert_raw_text() handles these cases.
+    """
+
+    def test_bold_before_korean_with_paren(self, adapter):
+        """Bold ending with ')' followed by Korean character."""
+        result = adapter.parse("**맞춤형 보고서(Tailored Report)**를")
+        inlines = result['blocks'][0]['c']
+        assert any(i.get('t') == 'Strong' for i in inlines)
+        # Verify the trailing text is separate
+        str_tokens = [i for i in inlines if i.get('t') == 'Str']
+        assert any(i['c'] == '를' for i in str_tokens)
+
+    def test_bold_paren_followed_by_word(self, adapter):
+        """Bold ending with ')' followed by ASCII word character."""
+        result = adapter.parse("**hello(world)**text")
+        inlines = result['blocks'][0]['c']
+        assert any(i.get('t') == 'Strong' for i in inlines)
+
+    def test_bold_bracket_followed_by_word(self, adapter):
+        """Bold ending with ']' followed by word character."""
+        result = adapter.parse("**item[1]**값")
+        inlines = result['blocks'][0]['c']
+        assert any(i.get('t') == 'Strong' for i in inlines)
+
+    def test_bold_period_followed_by_word(self, adapter):
+        """Bold ending with '.' followed by word character."""
+        result = adapter.parse("**v1.0**release")
+        inlines = result['blocks'][0]['c']
+        assert any(i.get('t') == 'Strong' for i in inlines)
+
+    def test_multiple_bold_in_sentence(self, adapter):
+        """Multiple bold sections, one requiring fallback."""
+        result = adapter.parse(
+            "갖춘 **보고서(Report)**를 생성 **슬라이드** 제작"
+        )
+        inlines = result['blocks'][0]['c']
+        strong_tokens = [i for i in inlines if i.get('t') == 'Strong']
+        assert len(strong_tokens) == 2
+
+    def test_normal_bold_unaffected(self, adapter):
+        """Normal bold (space after closing **) still works."""
+        result = adapter.parse("**bold** text")
+        inlines = result['blocks'][0]['c']
+        assert any(i.get('t') == 'Strong' for i in inlines)
+        strong = next(i for i in inlines if i.get('t') == 'Strong')
+        str_in_strong = [s for s in strong['c'] if s.get('t') == 'Str']
+        assert any(s['c'] == 'bold' for s in str_in_strong)
+
+    def test_no_false_positive_on_plain_text(self, adapter):
+        """Plain text without emphasis markers is unaffected."""
+        result = adapter.parse("plain text without bold")
+        inlines = result['blocks'][0]['c']
+        assert not any(i.get('t') == 'Strong' for i in inlines)
+
+    def test_bold_content_preserved(self, adapter):
+        """Verify the content inside fallback bold is correct."""
+        result = adapter.parse("**Report)**를")
+        inlines = result['blocks'][0]['c']
+        strong = next(i for i in inlines if i.get('t') == 'Strong')
+        inner_strs = [s['c'] for s in strong['c'] if s.get('t') == 'Str']
+        assert 'Report)' in inner_strs

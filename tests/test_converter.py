@@ -1001,3 +1001,41 @@ class TestPageBreakBeforeH1:
         )
         xml_body, _ = converter.convert()
         assert 'pageBreak="1"' not in xml_body
+
+
+class TestBrLineBreak:
+    """Test HTML <br> tag handling as line breaks."""
+
+    def test_br_in_table_cell_creates_linebreak(self, blank_hwpx_path):
+        """<br> in table cell should produce a lineBreak element."""
+        converter = _make_converter(
+            "| A |\n|---|\n| line1<br>line2 |",
+            blank_hwpx_path
+        )
+        xml_body, _ = converter.convert()
+        assert 'lineBreak' in xml_body
+        assert 'line1' in xml_body
+        assert 'line2' in xml_body
+
+    def test_br_in_paragraph_creates_linebreak(self, blank_hwpx_path):
+        """<br> in a paragraph should produce a lineBreak element."""
+        converter = _make_converter("hello<br>world", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        assert 'lineBreak' in xml_body
+        assert 'hello' in xml_body
+        assert 'world' in xml_body
+
+    def test_br_self_closing_variant(self, blank_hwpx_path):
+        """<br/> variant should also be handled."""
+        converter = _make_converter("hello<br/>world", blank_hwpx_path)
+        xml_body, _ = converter.convert()
+        assert 'lineBreak' in xml_body
+
+    def test_multiple_br_in_cell(self, blank_hwpx_path):
+        """Multiple <br> tags in a single cell."""
+        converter = _make_converter(
+            "| A |\n|---|\n| a<br>b<br>c |",
+            blank_hwpx_path
+        )
+        xml_body, _ = converter.convert()
+        assert xml_body.count('lineBreak') >= 2

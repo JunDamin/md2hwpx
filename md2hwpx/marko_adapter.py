@@ -469,13 +469,72 @@ class MarkoToPandocAdapter:
 
         return None
 
+    # Regex for fallback emphasis parsing: detect literal **...** or *...*
+    # that Marko failed to parse due to CommonMark delimiter rules
+    # (e.g., punctuation before closing ** followed by a word character)
+    _FALLBACK_BOLD_RE = re.compile(r'\*\*(.+?)\*\*')
+    _FALLBACK_ITALIC_RE = re.compile(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)')
+
     def _convert_raw_text(self, text: str) -> list:
-        """Convert raw text to Str and Space tokens."""
+        """Convert raw text to Str and Space tokens, with fallback emphasis parsing.
+
+        Handles CommonMark edge cases where Marko leaves literal **...** or *...*
+        in RawText nodes (e.g., punctuation before closing ** followed by a
+        non-punctuation character like Korean syllables).
+        """
+        if not text:
+            return []
+
+        # Fallback: detect literal **...** that Marko failed to parse
+        if self._FALLBACK_BOLD_RE.search(text):
+            return self._parse_fallback_emphasis(text, self._FALLBACK_BOLD_RE, 'Strong')
+
+        # Fallback: detect literal *...* that Marko failed to parse
+        if self._FALLBACK_ITALIC_RE.search(text):
+            return self._parse_fallback_emphasis(text, self._FALLBACK_ITALIC_RE, 'Emph')
+
+        # Standard logic: split by spaces into Str and Space tokens
+        return self._convert_raw_text_simple(text)
+
+    def _parse_fallback_emphasis(self, text: str, pattern, emph_type: str) -> list:
+        """Parse text with fallback emphasis detection for patterns Marko missed.
+
+        Splits text around emphasis matches, converting matched regions to
+        Strong or Emph tokens and processing surrounding text normally.
+        """
+        result = []
+        last_end = 0
+
+        for match in pattern.finditer(text):
+            # Add text before the match
+            before = text[last_end:match.start()]
+            if before:
+                result.extend(self._convert_raw_text(before))
+
+            # Add the emphasis content
+            inner_text = match.group(1)
+            inner_inlines = self._convert_raw_text(inner_text)
+            result.append({"t": emph_type, "c": inner_inlines})
+
+            last_end = match.end()
+
+        # Add remaining text after last match (use simple to avoid infinite recursion)
+        after = text[last_end:]
+        if after:
+            result.extend(self._convert_raw_text_simple(after))
+
+        return result
+
+    def _convert_raw_text_simple(self, text: str) -> list:
+        """Convert raw text to Str and Space tokens (no emphasis fallback).
+
+        This is the original text splitting logic, used to avoid infinite
+        recursion when processing trailing text after a fallback emphasis match.
+        """
         if not text:
             return []
 
         result = []
-        # Split by spaces but keep track of leading/trailing spaces
         parts = text.split(' ')
 
         for i, part in enumerate(parts):

@@ -2096,6 +2096,14 @@ class MarkdownToHwpx:
                 run = self._create_linebreak_run_elem(char_pr_id=get_current_id())
                 parent_elem.append(run)
 
+            elif i_type == 'RawInline':
+                # Handle HTML <br> tags as line breaks
+                if isinstance(i_content, list) and len(i_content) >= 2:
+                    html_content = i_content[1].strip().lower()
+                    if html_content in ('<br>', '<br/>', '<br />'):
+                        run = self._create_linebreak_run_elem(char_pr_id=get_current_id())
+                        parent_elem.append(run)
+
     def _parse_dimension(self, val_str):
         if not val_str:
             return None
