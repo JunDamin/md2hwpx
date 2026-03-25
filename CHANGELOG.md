@@ -4,6 +4,17 @@ All notable changes to md2hwpx will be documented in this file.
 
 Forked from pypandoc-hwpx: https://github.com/msjang/pypandoc-hwpx
 
+## [0.1.4] - 2026-03-25
+
+### Added
+- CLI support for loading JSON or YAML config files with `--config`
+- Per-header-level spacing controls via `--page-break-before`, `--blank-lines-before-header`, and `--space-before-header`
+- Config fields for per-level header page breaks and spacing
+- Preservation of image-based prefix runs for placeholders and list bullets
+
+### Changed
+- Header pre-spacing now resolves through a single helper so page breaks, blank lines, and fixed-height spacers follow consistent precedence
+
 ## [0.2.0] - 2026-01-29
 
 ### Added
