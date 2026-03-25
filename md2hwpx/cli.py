@@ -66,6 +66,18 @@ def main():
                         help="Suppress all non-error output")
     parser.add_argument("--blank-line-before-header", action="store_true", default=False,
                         help="Insert a blank line before headers (H1-H3) in the middle of the document")
+    parser.add_argument("--config", default=None, metavar="FILE",
+                        help="Path to JSON or YAML config file (snake_case keys). CLI args override file settings.")
+    parser.add_argument("--page-break-before", default=None, metavar="LEVELS",
+                        help="Insert page break before specified header levels. "
+                             "Comma-separated, e.g. --page-break-before 1,2")
+    parser.add_argument("--blank-lines-before-header", default=None, metavar="SPEC",
+                        help="Blank line count before headers per level. "
+                             "Format: LEVEL:COUNT, e.g. --blank-lines-before-header 2:2,3:1")
+    parser.add_argument("--space-before-header", default=None, metavar="SPEC",
+                        help="Precise space (mm) before headers per level. "
+                             "Format: LEVEL:MM, e.g. --space-before-header 2:10,3:5. "
+                             "Overrides --blank-lines-before-header for the same level.")
 
     args = parser.parse_args()
 
@@ -116,10 +128,60 @@ def main():
     # Inject metadata into AST
     ast['meta'] = convert_metadata_to_pandoc_meta(metadata)
 
-    # Build config from CLI flags
-    config = ConversionConfig()
+    # Build config: load file first, then apply individual CLI flags (which override file)
+    if args.config:
+        try:
+            config = ConversionConfig.from_file(args.config)
+        except (OSError, ValueError, ImportError) as e:
+            logger.error("Failed to load config file %s: %s", args.config, e)
+            sys.exit(1)
+    else:
+        config = ConversionConfig()
+
     if args.blank_line_before_header:
         config.BLANK_LINE_BEFORE_HEADER = True
+
+    if args.page_break_before:
+        levels = {}
+        for x in args.page_break_before.split(','):
+            x = x.strip()
+            if x.isdigit() and 1 <= int(x) <= 6:
+                levels[int(x)] = True
+            else:
+                logger.warning("--page-break-before: invalid level %r (must be 1-6), skipped", x)
+        if levels:
+            config.PAGE_BREAK_BEFORE_HEADER_LEVELS = levels
+
+    if args.blank_lines_before_header:
+        pairs = {}
+        for part in args.blank_lines_before_header.split(','):
+            if ':' in part:
+                lvl_s, cnt_s = part.strip().split(':', 1)
+                if lvl_s.isdigit() and cnt_s.isdigit():
+                    lvl, cnt = int(lvl_s), int(cnt_s)
+                    if 1 <= lvl <= 6 and 0 <= cnt <= 2:
+                        pairs[lvl] = cnt
+                    else:
+                        logger.warning("--blank-lines-before-header: out-of-range %r, skipped", part)
+        if pairs:
+            config.BLANK_LINES_BEFORE_HEADER = pairs
+
+    if args.space_before_header:
+        pairs = {}
+        for part in args.space_before_header.split(','):
+            if ':' in part:
+                lvl_s, mm_s = part.strip().split(':', 1)
+                if lvl_s.isdigit():
+                    try:
+                        lvl, mm = int(lvl_s), float(mm_s)
+                        if 1 <= lvl <= 6 and mm >= 0:
+                            pairs[lvl] = mm
+                        else:
+                            logger.warning("--space-before-header: out-of-range %r, skipped", part)
+                    except ValueError:
+                        logger.warning("--space-before-header: invalid value %r, skipped", part)
+        if pairs:
+            config.SPACE_BEFORE_HEADER_MM = pairs
 
     try:
         if output_ext == ".hwpx":

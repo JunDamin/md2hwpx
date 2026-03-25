@@ -60,6 +60,15 @@ class ConversionConfig:
     BLANK_LINE_BEFORE_HEADER: bool = False          # Insert empty para before headers in middle of doc
     BLANK_LINE_BEFORE_HEADER_LEVELS: tuple = (1, 2, 3)  # Which header levels get blank lines
 
+    # Per-level page break: {level: bool}, None = use PAGE_BREAK_BEFORE_H1 fallback
+    PAGE_BREAK_BEFORE_HEADER_LEVELS: dict = None    # e.g. {1: True, 2: True}
+
+    # Per-level blank line count: {level: int 0-2}, None = use BLANK_LINE_BEFORE_HEADER fallback
+    BLANK_LINES_BEFORE_HEADER: dict = None          # e.g. {2: 2, 3: 1}
+
+    # Per-level precise space height (mm): {level: float}, None = not set. Overrides BLANK_LINES_BEFORE_HEADER.
+    SPACE_BEFORE_HEADER_MM: dict = None             # e.g. {2: 10.0, 3: 5.0}
+
     # === Table Options ===
     TABLE_REPEAT_HEADER: bool = True                # repeatHeader attribute on tbl element
 
@@ -78,6 +87,52 @@ class ConversionConfig:
     MAX_TEMPLATE_FILE_SIZE = 50 * 1024 * 1024  # 50 MB max template file
     MAX_NESTING_DEPTH = 20  # Max recursion for nested lists/quotes
     MAX_IMAGE_COUNT = 500  # Max number of images in a single document
+
+
+    @classmethod
+    def from_file(cls, path):
+        """Load config from a JSON or YAML file.
+
+        File keys use snake_case matching ConversionConfig attribute names
+        (e.g. ``page_break_before_h1`` maps to ``PAGE_BREAK_BEFORE_H1``).
+        Unknown keys are silently ignored.
+
+        For dict-valued fields, integer-string keys are automatically converted
+        to integers (e.g. JSON ``{"2": 1}`` becomes ``{2: 1}``).
+
+        Args:
+            path: Path to a .json or .yaml/.yml file.
+
+        Returns:
+            ConversionConfig instance with values loaded from the file.
+        """
+        import json as _json
+        try:
+            import yaml as _yaml
+            _has_yaml = True
+        except ImportError:
+            _has_yaml = False
+
+        cfg = cls()
+        with open(path, 'r', encoding='utf-8') as f:
+            if path.lower().endswith('.json'):
+                data = _json.load(f)
+            elif _has_yaml:
+                data = _yaml.safe_load(f) or {}
+            else:
+                raise ImportError(
+                    "PyYAML is required to load YAML config files. "
+                    "Install it with: pip install pyyaml"
+                )
+
+        for key, value in data.items():
+            attr = key.upper()
+            if hasattr(cfg, attr):
+                if isinstance(value, dict):
+                    value = {int(k) if str(k).isdigit() else k: v
+                             for k, v in value.items()}
+                setattr(cfg, attr, value)
+        return cfg
 
 
 # Global default config instance

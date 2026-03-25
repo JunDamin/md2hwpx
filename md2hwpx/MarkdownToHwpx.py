@@ -678,6 +678,7 @@ class MarkdownToHwpx:
                     'styleIDRef': info.get('styleIDRef', '0'),
                     'prefix': info.get('prefix'),
                     'prefixCharPrIDRef': info.get('prefixCharPrIDRef'),
+                    'prefixRunElems': info.get('prefixRunElems'),
                     'table': info.get('table'),
                     'mode': info.get('mode', 'plain'),
                     'numberingText': info.get('numberingText'),
@@ -846,6 +847,62 @@ class MarkdownToHwpx:
         prefix_text = ''.join(prefix_parts) if prefix_parts else None
         return prefix_text, prefix_char_pr_id
 
+    def _collect_prefix_run_elems(self, para, current_run, current_t_elem=None):
+        """Collect run elements that contain images to use as prefix.
+
+        Handles two cases:
+        1. Image in a preceding run (e.g., run1: <pic/><t> </t>, run2: <t>{{H3}}</t>)
+        2. Image in the same run before the placeholder hp:t
+           (e.g., run: <t> </t><pic/><t>{{LIST_BULLET_1}}</t>)
+
+        Args:
+            para: The paragraph element containing the runs
+            current_run: The run element containing the placeholder hp:t
+            current_t_elem: The hp:t element containing the placeholder text,
+                            needed to detect same-run images
+
+        Returns:
+            List of ET.Element run objects to use as prefix, or empty list if
+            no image prefix was found.
+        """
+        pic_tag = f'{{{NS_PARA}}}pic'
+        run_tag = f'{{{NS_PARA}}}run'
+
+        # Case 1: check preceding runs for images
+        preceding_image_runs = []
+        for r in para:
+            if r.tag != run_tag:
+                continue
+            if r is current_run:
+                break
+            if r.find('hp:pic', self.namespaces) is not None:
+                preceding_image_runs.append(r)
+
+        if preceding_image_runs:
+            return preceding_image_runs
+
+        # Case 2: image in the same run, before current_t_elem
+        if current_t_elem is not None:
+            t_tag = f'{{{NS_PARA}}}t'
+            prefix_children = []
+            has_pic = False
+            for child in current_run:
+                if child is current_t_elem:
+                    break
+                if child.tag in (t_tag, pic_tag):
+                    prefix_children.append(child)
+                    if child.tag == pic_tag:
+                        has_pic = True
+            if has_pic:
+                # Build a synthetic prefix run with the same charPrIDRef
+                prefix_run = ET.Element(f'{{{NS_PARA}}}run')
+                prefix_run.set('charPrIDRef', current_run.get('charPrIDRef', '0'))
+                for child in prefix_children:
+                    prefix_run.append(copy.deepcopy(child))
+                return [prefix_run]
+
+        return []
+
     def _extract_prefix_with_preceding_runs(self, para, run, full_text, match_start):
         """Extract prefix text from before a regex match, falling back to preceding runs.
 
@@ -894,12 +951,15 @@ class MarkdownToHwpx:
                         styles = self._extract_style_ids(para, run)
                         has_numbering, num_pr_id = self._check_para_pr_has_numbering(styles['paraPrIDRef'])
 
+                        prefix_run_elems = self._collect_prefix_run_elems(para, run, text_elem)
+
                         list_styles[(list_type, level)] = {
                             'charPrIDRef': styles['charPrIDRef'],
                             'paraPrIDRef': styles['paraPrIDRef'],
                             'mode': 'numbering' if has_numbering else 'prefix',
-                            'prefix': prefix if not has_numbering else None,
+                            'prefix': prefix if (not has_numbering and not prefix_run_elems) else None,
                             'numPrIDRef': num_pr_id if has_numbering else None,
+                            'prefixRunElems': prefix_run_elems if (not has_numbering and prefix_run_elems) else None,
                         }
                         continue
 
@@ -916,13 +976,16 @@ class MarkdownToHwpx:
                             prefix, prefix_char_pr_id = self._extract_prefix_with_preceding_runs(
                                 para, run, text_elem.text, header_match.start())
 
+                            prefix_run_elems = self._collect_prefix_run_elems(para, run, text_elem)
+
                             styles = self._extract_style_ids(para, run)
                             placeholders[header_name] = {
                                 **styles,
-                                'prefix': prefix,
-                                'prefixCharPrIDRef': prefix_char_pr_id,
+                                'prefix': prefix if not prefix_run_elems else None,
+                                'prefixCharPrIDRef': prefix_char_pr_id if not prefix_run_elems else None,
+                                'prefixRunElems': prefix_run_elems if prefix_run_elems else None,
                                 'table': None,
-                                'mode': 'prefix' if prefix else 'plain',
+                                'mode': 'prefix' if (prefix or prefix_run_elems) else 'plain',
                             }
                         continue
 
@@ -939,13 +1002,16 @@ class MarkdownToHwpx:
                         prefix, prefix_char_pr_id = self._extract_prefix_with_preceding_runs(
                             para, run, text_elem.text, match.start())
 
+                        prefix_run_elems = self._collect_prefix_run_elems(para, run, text_elem)
+
                         styles = self._extract_style_ids(para, run)
                         placeholders[placeholder_name] = {
                             **styles,
-                            'prefix': prefix,
-                            'prefixCharPrIDRef': prefix_char_pr_id,
+                            'prefix': prefix if not prefix_run_elems else None,
+                            'prefixCharPrIDRef': prefix_char_pr_id if not prefix_run_elems else None,
+                            'prefixRunElems': prefix_run_elems if prefix_run_elems else None,
                             'table': None,
-                            'mode': 'prefix' if prefix else 'plain',
+                            'mode': 'prefix' if (prefix or prefix_run_elems) else 'plain',
                         }
 
     def _extract_cell_attributes(self, tc, para, run):
@@ -1145,12 +1211,22 @@ class MarkdownToHwpx:
             b_content = block.get('c')
 
             if b_type == 'Header':
-                # Pre-block hook: blank line before header (only when not first block)
+                # Pre-block hook: spacing before header (only when not first block)
                 if self._has_emitted_block:
                     level = b_content[0] if b_content else 0
-                    if (self.config.BLANK_LINE_BEFORE_HEADER
-                            and level in self.config.BLANK_LINE_BEFORE_HEADER_LEVELS):
-                        result.append(self._make_empty_para())
+                    _, blank_lines, space_mm = self._get_header_pre_break_info(level)
+                    if space_mm:
+                        height = int(space_mm * self.config.LUNIT_PER_MM)
+                        para_pr_id = self._get_fixed_height_para_pr(height)
+                        spacer = self._create_para_elem(
+                            style_id=self.normal_style_id,
+                            para_pr_id=int(para_pr_id)
+                        )
+                        spacer.append(self._create_text_run_elem(" "))
+                        result.append(self._elem_to_str(spacer))
+                    else:
+                        for _ in range(blank_lines):
+                            result.append(self._make_empty_para())
                 result.append(self._handle_header(b_content))
             else:
                 handler = self._block_handlers.get(b_type)
@@ -1227,6 +1303,79 @@ class MarkdownToHwpx:
 
     # --- Block Handlers ---
 
+    def _get_header_pre_break_info(self, level):
+        """Determine page break and blank space settings for a header level.
+
+        Returns:
+            tuple of (page_break: bool, blank_lines: int, space_mm: float or None)
+            - page_break: True if a page break should be inserted
+            - blank_lines: number of blank paragraphs to insert (0 if page_break or space_mm)
+            - space_mm: mm-height of a single spacer paragraph (None if not set)
+        """
+        # Page break decision
+        if self.config.PAGE_BREAK_BEFORE_HEADER_LEVELS is not None:
+            page_break = bool(self.config.PAGE_BREAK_BEFORE_HEADER_LEVELS.get(level, False))
+        else:
+            page_break = (level == 1 and self.config.PAGE_BREAK_BEFORE_H1)
+
+        if page_break:
+            return True, 0, None
+
+        # mm-height spacer (higher priority than blank line count)
+        if self.config.SPACE_BEFORE_HEADER_MM is not None:
+            mm = self.config.SPACE_BEFORE_HEADER_MM.get(level)
+            if mm:
+                return False, 0, float(mm)
+
+        # Blank line count
+        if self.config.BLANK_LINES_BEFORE_HEADER is not None:
+            blank_lines = max(0, min(2, int(self.config.BLANK_LINES_BEFORE_HEADER.get(level, 0))))
+        else:
+            if (self.config.BLANK_LINE_BEFORE_HEADER
+                    and level in self.config.BLANK_LINE_BEFORE_HEADER_LEVELS):
+                blank_lines = 1
+            else:
+                blank_lines = 0
+
+        return False, blank_lines, None
+
+    def _get_fixed_height_para_pr(self, height_hwpunit):
+        """Create or retrieve a paraPr with fixed line spacing for spacer paragraphs.
+
+        Uses the same pattern as _get_blockquote_para_pr().
+
+        Args:
+            height_hwpunit: Desired paragraph height in HWPUNIT
+
+        Returns:
+            paraPr ID string
+        """
+        if not hasattr(self, '_fixed_height_para_pr_cache'):
+            self._fixed_height_para_pr_cache = {}
+        if height_hwpunit in self._fixed_height_para_pr_cache:
+            return self._fixed_height_para_pr_cache[height_hwpunit]
+
+        base_id = self.normal_para_pr_id
+        base_node = self.header_root.find(f'.//hh:paraPr[@id="{base_id}"]', self.namespaces)
+        if base_node is None:
+            return str(base_id)
+
+        new_node = copy.deepcopy(base_node)
+        self.max_para_pr_id += 1
+        new_id = str(self.max_para_pr_id)
+        new_node.set('id', new_id)
+
+        for ls in new_node.findall('.//hh:lineSpacing', self.namespaces):
+            ls.set('type', 'FIXED')
+            ls.set('value', str(height_hwpunit))
+
+        para_props = self.header_root.find('.//hh:paraProperties', self.namespaces)
+        if para_props is not None:
+            para_props.append(new_node)
+
+        self._fixed_height_para_pr_cache[height_hwpunit] = new_id
+        return new_id
+
     def _handle_header(self, content):
         level = content[0]
         inlines = content[2]
@@ -1239,10 +1388,12 @@ class MarkdownToHwpx:
                 column_break_val = 1
                 inlines = inlines[1:]  # Remove the LineBreak
 
-        # Page break before H1 when not the first block in the document
+        # Page break before header when not the first block in the document
         page_break_val = 0
-        if level == 1 and self._has_emitted_block and self.config.PAGE_BREAK_BEFORE_H1:
-            page_break_val = 1
+        if self._has_emitted_block:
+            page_break, _, _ = self._get_header_pre_break_info(level)
+            if page_break:
+                page_break_val = 1
 
         # Reset child header counters when a parent header appears
         for child_level in list(self.header_counters):
@@ -1481,8 +1632,14 @@ class MarkdownToHwpx:
         para = self._create_para_elem(style_id=style_id, para_pr_id=para_pr_id,
                                       column_break=column_break, page_break=page_break)
 
-        # Add prefix as first run if present, with auto-numbering
-        if prefix:
+        # Add prefix as first run(s) if present
+        prefix_run_elems = props.get('prefixRunElems')
+        if prefix_run_elems:
+            # Image-based prefix: deep copy the template run elements
+            for run_elem in prefix_run_elems:
+                para.append(copy.deepcopy(run_elem))
+        elif prefix:
+            # Text-based prefix with auto-numbering
             formatted_prefix = self._format_counter_text(prefix, counter)
             prefix_char_pr_id = props.get('prefixCharPrIDRef')
             prefix_cid = int(prefix_char_pr_id) if prefix_char_pr_id else char_pr_id
@@ -2769,6 +2926,7 @@ class MarkdownToHwpx:
         style_info = self.list_styles.get(list_key, {})
 
         prefix = style_info.get('prefix', '')
+        prefix_run_elems = style_info.get('prefixRunElems')
         char_pr_id = int(style_info.get('charPrIDRef', 0))
         para_pr_id = int(style_info.get('paraPrIDRef', self.normal_para_pr_id))
 
@@ -2787,13 +2945,17 @@ class MarkdownToHwpx:
                         para_pr_id=para_pr_id
                     )
 
-                    # Format prefix (increment numbers for ordered lists)
-                    current_prefix = self._format_list_prefix(prefix, list_type, item_counter)
-
-                    # Add prefix as first run
-                    if current_prefix:
-                        prefix_run = self._create_text_run_elem(current_prefix, char_pr_id)
-                        para.append(prefix_run)
+                    # Add prefix as first run(s)
+                    if prefix_run_elems:
+                        # Image-based prefix: deep copy the template run elements
+                        for run_elem in prefix_run_elems:
+                            para.append(copy.deepcopy(run_elem))
+                    else:
+                        # Text-based prefix (increment numbers for ordered lists)
+                        current_prefix = self._format_list_prefix(prefix, list_type, item_counter)
+                        if current_prefix:
+                            prefix_run = self._create_text_run_elem(current_prefix, char_pr_id)
+                            para.append(prefix_run)
 
                     # Add content
                     self._process_inlines_to_elems(b_content, para, base_char_pr_id=char_pr_id)
